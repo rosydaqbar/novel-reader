@@ -42,10 +42,10 @@ export async function hasHandlePermission(handle, mode = 'readwrite') {
 }
 
 export async function createStarterNovel(rootHandle, title) {
-  const actsDir = await rootHandle.getDirectoryHandle('acts', { create: true });
+  const volumesDir = await rootHandle.getDirectoryHandle('volumes', { create: true });
   await ensureCodexFolders(rootHandle);
-  const actHandle = await actsDir.getFileHandle('act1.md', { create: true });
-  await writeTextFile(actHandle, createActMarkdown({ title, actLabel: 'Act 1' }));
+  const volumeHandle = await volumesDir.getFileHandle('volume1.md', { create: true });
+  await writeTextFile(volumeHandle, createVolumeMarkdown({ title, volumeLabel: 'Volume 1' }));
 }
 
 export async function ensureCodexFolders(rootHandle) {
@@ -53,45 +53,89 @@ export async function ensureCodexFolders(rootHandle) {
   await Promise.all(codexCategories.map((category) => codexDir.getDirectoryHandle(category, { create: true })));
 }
 
-export async function listActs(rootHandle) {
-  const actsDir = await getDirectoryOrNull(rootHandle, 'acts');
-  if (!actsDir) return [];
+export async function listVolumes(rootHandle) {
+  const volumesDir = await getDirectoryOrNull(rootHandle, 'volumes');
+  const legacyActsDir = await getDirectoryOrNull(rootHandle, 'acts');
+  const volumes = [];
+  const seen = new Set();
 
-  const acts = [];
-  for await (const [name, handle] of actsDir.entries()) {
+  if (volumesDir) for await (const [name, handle] of volumesDir.entries()) {
+    if (handle.kind !== 'file') continue;
+    const match = name.match(/^volume(\d+)\.md$/);
+    if (!match) continue;
+    const number = Number(match[1]);
+    seen.add(number);
+    volumes.push(volumeMeta(number));
+  }
+
+  if (legacyActsDir) for await (const [name, handle] of legacyActsDir.entries()) {
     if (handle.kind !== 'file') continue;
     const match = name.match(/^act(\d+)\.md$/);
     if (!match) continue;
-    acts.push(actMeta(Number(match[1])));
+    const number = Number(match[1]);
+    if (!seen.has(number)) volumes.push(legacyActMeta(number));
   }
-  return acts.sort((a, b) => a.number - b.number);
+
+  return volumes.sort((a, b) => a.number - b.number);
 }
 
-export async function createAct(rootHandle, title) {
-  const acts = await listActs(rootHandle);
-  const nextNumber = Math.max(0, ...acts.map((act) => act.number)) + 1;
-  const act = actMeta(nextNumber);
-  const actsDir = await rootHandle.getDirectoryHandle('acts', { create: true });
-  const actHandle = await actsDir.getFileHandle(act.filename, { create: true });
-  await writeTextFile(actHandle, createActMarkdown({ title, actLabel: act.label }));
-  return act;
+export async function createVolume(rootHandle, title) {
+  const volumes = await listVolumes(rootHandle);
+  const nextNumber = Math.max(0, ...volumes.map((volume) => volume.number)) + 1;
+  const volume = volumeMeta(nextNumber);
+  const volumesDir = await rootHandle.getDirectoryHandle('volumes', { create: true });
+  const volumeHandle = await volumesDir.getFileHandle(volume.filename, { create: true });
+  await writeTextFile(volumeHandle, createVolumeMarkdown({ title, volumeLabel: volume.label }));
+  return volume;
 }
 
-export async function readAct(rootHandle, actId) {
-  const act = getActFromId(actId);
-  const actsDir = await rootHandle.getDirectoryHandle('acts');
-  const actHandle = await actsDir.getFileHandle(act.filename);
-  const markdown = await readTextFile(actHandle);
-  return { act, novel: withStats(parseNovel(markdown)) };
+export async function readVolume(rootHandle, volumeId) {
+  const volume = getVolumeFromId(volumeId);
+  const volumesDir = await getDirectoryOrNull(rootHandle, 'volumes');
+  const volumeHandle = volumesDir ? await getFileOrNull(volumesDir, volume.filename) : null;
+  if (volumeHandle) return { volume, novel: withStats(parseNovel(await readTextFile(volumeHandle))) };
+
+  const legacyActsDir = await getDirectoryOrNull(rootHandle, 'acts');
+  const legacyHandle = legacyActsDir ? await getFileOrNull(legacyActsDir, `act${volume.number}.md`) : null;
+  if (legacyHandle) return { volume: legacyActMeta(volume.number), novel: withStats(parseNovel(await readTextFile(legacyHandle))) };
+
+  throw new Error(`${volume.filename} was not found.`);
 }
 
-export async function writeAct(rootHandle, actId, novel, codexEntries) {
-  const act = getActFromId(actId);
-  const actsDir = await rootHandle.getDirectoryHandle('acts', { create: true });
-  const actHandle = await actsDir.getFileHandle(act.filename, { create: true });
+export async function writeVolume(rootHandle, volumeId, novel, codexEntries) {
+  const volume = getVolumeFromId(volumeId);
+  const volumesDir = await rootHandle.getDirectoryHandle('volumes', { create: true });
+  const volumeHandle = await volumesDir.getFileHandle(volume.filename, { create: true });
   const markdown = serializeNovel(novel, { codexEntries });
-  await writeTextFile(actHandle, markdown);
-  return { act, novel: withStats(parseNovel(markdown)) };
+  await writeTextFile(volumeHandle, markdown);
+  return { volume, novel: withStats(parseNovel(markdown)) };
+}
+
+export async function migrateLegacyActsToVolumes(rootHandle) {
+  const legacyActsDir = await getDirectoryOrNull(rootHandle, 'acts');
+  if (!legacyActsDir) return { migrated: 0, skipped: 0 };
+
+  const volumesDir = await rootHandle.getDirectoryHandle('volumes', { create: true });
+  let migrated = 0;
+  let skipped = 0;
+
+  for await (const [name, handle] of legacyActsDir.entries()) {
+    if (handle.kind !== 'file') continue;
+    const match = name.match(/^act(\d+)\.md$/);
+    if (!match) continue;
+
+    const targetFilename = `volume${match[1]}.md`;
+    if (await getFileOrNull(volumesDir, targetFilename)) {
+      skipped += 1;
+      continue;
+    }
+
+    const targetHandle = await volumesDir.getFileHandle(targetFilename, { create: true });
+    await writeTextFile(targetHandle, await readTextFile(handle));
+    migrated += 1;
+  }
+
+  return { migrated, skipped };
 }
 
 export async function listCodexEntries(rootHandle) {
@@ -283,18 +327,28 @@ function putStoreValue(database, key, value) {
   });
 }
 
-function actMeta(number) {
-  return { id: `act${number}`, number, label: `Act ${number}`, filename: `act${number}.md`, path: `acts/act${number}.md` };
+function volumeMeta(number) {
+  return { id: `volume${number}`, number, label: `Volume ${number}`, filename: `volume${number}.md`, path: `volumes/volume${number}.md` };
 }
 
-function getActFromId(actId) {
-  const match = String(actId ?? '').match(/^act(\d+)$/);
-  if (!match) throw new Error('Invalid act id.');
-  return actMeta(Number(match[1]));
+function legacyActMeta(number) {
+  return { id: `volume${number}`, number, label: `Volume ${number}`, filename: `act${number}.md`, path: `acts/act${number}.md`, legacy: true };
 }
 
-function createActMarkdown({ actLabel, title }) {
-  return [`## ${title || 'Untitled Novel'}`, '', `### Chapter 1: ${actLabel} Opening`, '', '#### Scene 1', '', 'Start writing here...', ''].join('\n');
+function getVolumeFromId(volumeId) {
+  const normalized = convertActIdToVolumeId(volumeId);
+  const match = String(normalized ?? '').match(/^volume(\d+)$/);
+  if (!match) throw new Error('Invalid volume id.');
+  return volumeMeta(Number(match[1]));
+}
+
+function convertActIdToVolumeId(id) {
+  const match = String(id ?? '').match(/^act(\d+)$/);
+  return match ? `volume${match[1]}` : id;
+}
+
+function createVolumeMarkdown({ volumeLabel, title }) {
+  return [`## ${title || 'Untitled Novel'}`, '', `### Chapter 1: ${volumeLabel} Opening`, '', '#### Scene 1', '', 'Start writing here...', ''].join('\n');
 }
 
 function parseNovel(markdown) {

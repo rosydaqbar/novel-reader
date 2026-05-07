@@ -4,7 +4,7 @@ A browser-based editor for managing a novel manuscript and its codex. The app ca
 
 ## What It Does
 
-- Edits novel act files as structured chapters and scenes.
+- Edits novel volume files as structured chapters and scenes.
 - Edits codex entries for characters, locations, and lore.
 - Detects codex mentions inside novel chapters.
 - Shows mentioned codex entries in the chapter view.
@@ -31,17 +31,17 @@ Firefox and Safari do not currently support the full local folder write workflow
 
 ## Novel
 
-Novel content is organized by act.
+Novel content is organized by volume.
 
 Expected selected folder structure:
 
 ```txt
-acts/
-  act1.md
-  act2.md
+volumes/
+  volume1.md
+  volume2.md
 ```
 
-Each act file contains chapters and scenes. The editor parses markdown headings into editable sections.
+Each volume file contains chapters and scenes. The editor parses markdown headings into editable sections.
 
 Supported structure:
 
@@ -57,12 +57,12 @@ Scene text...
 
 Novel features:
 
-- Switch between acts.
-- Add new acts.
+- Switch between volumes.
+- Add new volumes.
 - Add, edit, and delete chapters.
 - Add, edit, collapse, and delete scenes.
 - Save changes locally first.
-- Update the active act file when ready.
+- Update the active volume file when ready.
 - Automatically generate `Codex Mentioned` sections for detected entries.
 
 ## Codex

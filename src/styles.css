@@ -202,14 +202,18 @@ label {
 }
 
 .sidebar > .stats,
+.sidebar > .volumeTabs,
 .sidebar > .actTabs,
+.sidebar > .migrationNotice,
 .sidebar > .codexTabs,
 .sidebar > .codexFilters {
   margin: 0;
 }
 
 .sidebar > .stats,
+.sidebar > .volumeTabs,
 .sidebar > .actTabs,
+.sidebar > .migrationNotice,
 .sidebar > .codexTabs,
 .sidebar > .codexFilters {
   border-bottom: 1px solid var(--border);
@@ -220,6 +224,7 @@ label {
   background: var(--surface);
 }
 
+.sidebar > .volumeTabs,
 .sidebar > .actTabs,
 .sidebar > .codexTabs {
   background: var(--surface-2);
@@ -227,6 +232,24 @@ label {
 
 .sidebar > .codexFilters {
   background: var(--surface);
+}
+
+.migrationNotice {
+  display: grid;
+  gap: 10px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--muted);
+}
+
+.migrationNotice strong {
+  color: var(--text);
+  font-size: var(--font-ui);
+}
+
+.migrationNotice p {
+  margin: 0;
+  font-size: var(--font-ui);
+  line-height: 1.618;
 }
 
 .appMenuItem {
@@ -252,6 +275,7 @@ label {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.volumeTabs,
 .actTabs,
 .codexTabs {
   display: grid;
@@ -259,6 +283,7 @@ label {
   margin-bottom: 0;
 }
 
+.volumeTab,
 .actTab,
 .codexTab {
   display: flex;
@@ -277,6 +302,7 @@ label {
   text-align: left;
 }
 
+.volumeTab small,
 .actTab small {
   color: var(--muted);
   font-size: var(--font-meta);
@@ -299,6 +325,8 @@ label {
   font-size: var(--font-meta);
 }
 
+.volumeTab:hover,
+.volumeTab.active,
 .actTab:hover,
 .actTab.active,
 .codexTab:hover,
@@ -307,6 +335,7 @@ label {
   color: var(--selected-text);
 }
 
+.volumeTab.active,
 .actTab.active,
 .codexTab.active {
   box-shadow: inset 3px 0 0 var(--accent);

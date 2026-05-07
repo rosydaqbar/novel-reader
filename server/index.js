@@ -11,6 +11,7 @@ const rootDir = path.resolve(__dirname, '..');
 const datasourceDir = path.join(rootDir, 'datasource');
 const novelPath = path.join(datasourceDir, 'novel.md');
 const actsDir = path.join(datasourceDir, 'acts');
+const volumesDir = path.join(datasourceDir, 'volumes');
 const codexDir = path.join(datasourceDir, 'codex');
 const distDir = path.join(rootDir, 'dist');
 const app = express();
@@ -18,46 +19,46 @@ const port = Number(process.env.PORT || 3001);
 
 app.use(express.json({ limit: '25mb' }));
 
-app.get('/api/acts', async (_request, response) => {
-  response.json({ acts: await listActs() });
+app.get('/api/volumes', async (_request, response) => {
+  response.json({ volumes: await listVolumes() });
 });
 
-app.post('/api/acts', async (request, response) => {
-  const acts = await listActs();
-  const nextNumber = Math.max(0, ...acts.map((act) => act.number)) + 1;
-  const act = actMeta(nextNumber);
+app.post('/api/volumes', async (request, response) => {
+  const volumes = await listVolumes();
+  const nextNumber = Math.max(0, ...volumes.map((volume) => volume.number)) + 1;
+  const volume = volumeMeta(nextNumber);
   const title = String(request.body?.title ?? '').trim() || 'Untitled Novel';
-  const markdown = createActMarkdown({ actLabel: act.label, title });
+  const markdown = createVolumeMarkdown({ volumeLabel: volume.label, title });
 
-  await mkdir(actsDir, { recursive: true });
-  await writeFile(act.path, markdown, { encoding: 'utf8', flag: 'wx' });
+  await mkdir(volumesDir, { recursive: true });
+  await writeFile(volume.path, markdown, { encoding: 'utf8', flag: 'wx' });
 
-  response.status(201).json({ act: publicAct(act), acts: await listActs(), novel: withStats(parseNovel(markdown)) });
+  response.status(201).json({ volume: publicVolume(volume), volumes: await listVolumes(), novel: withStats(parseNovel(markdown)) });
 });
 
-app.get('/api/acts/:actId', async (request, response) => {
-  const act = getActFromId(request.params.actId);
-  if (!act) {
-    response.status(400).json({ error: 'Invalid act id.' });
+app.get('/api/volumes/:volumeId', async (request, response) => {
+  const volume = getVolumeFromId(request.params.volumeId);
+  if (!volume) {
+    response.status(400).json({ error: 'Invalid volume id.' });
     return;
   }
 
   try {
-    const markdown = await readActMarkdown(act);
-    response.json({ act: publicAct(act), novel: withStats(parseNovel(markdown)) });
+    const markdown = await readVolumeMarkdown(volume);
+    response.json({ volume: publicVolume(volume), novel: withStats(parseNovel(markdown)) });
   } catch (error) {
     if (error.code === 'ENOENT') {
-      response.status(404).json({ error: 'Act not found.' });
+      response.status(404).json({ error: 'Volume not found.' });
       return;
     }
     throw error;
   }
 });
 
-app.put('/api/acts/:actId', async (request, response) => {
-  const act = getActFromId(request.params.actId);
-  if (!act) {
-    response.status(400).json({ error: 'Invalid act id.' });
+app.put('/api/volumes/:volumeId', async (request, response) => {
+  const volume = getVolumeFromId(request.params.volumeId);
+  if (!volume) {
+    response.status(400).json({ error: 'Invalid volume id.' });
     return;
   }
 
@@ -67,13 +68,69 @@ app.put('/api/acts/:actId', async (request, response) => {
     return;
   }
 
-  response.json(await saveActNovel(act, novel));
+  response.json(await saveVolumeNovel(volume, novel));
+});
+
+app.get('/api/acts', async (_request, response) => {
+  const volumes = await listVolumes();
+  response.json({ acts: volumes, volumes });
+});
+
+app.post('/api/acts', async (request, response) => {
+  const volumes = await listVolumes();
+  const nextNumber = Math.max(0, ...volumes.map((volume) => volume.number)) + 1;
+  const volume = volumeMeta(nextNumber);
+  const title = String(request.body?.title ?? '').trim() || 'Untitled Novel';
+  const markdown = createVolumeMarkdown({ volumeLabel: volume.label, title });
+
+  await mkdir(volumesDir, { recursive: true });
+  await writeFile(volume.path, markdown, { encoding: 'utf8', flag: 'wx' });
+
+  const nextVolumes = await listVolumes();
+  response.status(201).json({ act: publicVolume(volume), volume: publicVolume(volume), acts: nextVolumes, volumes: nextVolumes, novel: withStats(parseNovel(markdown)) });
+});
+
+app.get('/api/acts/:actId', async (request, response) => {
+  request.params.volumeId = convertActIdToVolumeId(request.params.actId);
+  const volume = getVolumeFromId(request.params.volumeId);
+  if (!volume) {
+    response.status(400).json({ error: 'Invalid volume id.' });
+    return;
+  }
+
+  try {
+    const markdown = await readVolumeMarkdown(volume);
+    response.json({ act: publicVolume(volume), volume: publicVolume(volume), novel: withStats(parseNovel(markdown)) });
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      response.status(404).json({ error: 'Volume not found.' });
+      return;
+    }
+    throw error;
+  }
+});
+
+app.put('/api/acts/:actId', async (request, response) => {
+  const volume = getVolumeFromId(convertActIdToVolumeId(request.params.actId));
+  if (!volume) {
+    response.status(400).json({ error: 'Invalid volume id.' });
+    return;
+  }
+
+  const novel = request.body?.novel;
+  if (!novel || !Array.isArray(novel.chapters)) {
+    response.status(400).json({ error: 'Invalid novel payload.' });
+    return;
+  }
+
+  const result = await saveVolumeNovel(volume, novel);
+  response.json({ ...result, act: result.volume });
 });
 
 app.get('/api/novel', async (_request, response) => {
-  const act = getActFromId('act1');
-  const markdown = await readActMarkdown(act);
-  response.json({ act: publicAct(act), novel: withStats(parseNovel(markdown)) });
+  const volume = getVolumeFromId('volume1');
+  const markdown = await readVolumeMarkdown(volume);
+  response.json({ volume: publicVolume(volume), act: publicVolume(volume), novel: withStats(parseNovel(markdown)) });
 });
 
 app.put('/api/novel', async (request, response) => {
@@ -83,7 +140,8 @@ app.put('/api/novel', async (request, response) => {
     return;
   }
 
-  response.json(await saveActNovel(getActFromId('act1'), novel));
+  const result = await saveVolumeNovel(getVolumeFromId('volume1'), novel);
+  response.json({ ...result, act: result.volume });
 });
 
 app.get('/api/codex', async (_request, response) => {
@@ -195,64 +253,93 @@ function toReadableError(error) {
   };
 }
 
-async function listActs() {
-  const actFiles = existsSync(actsDir) ? await readdir(actsDir, { withFileTypes: true }) : [];
-  const acts = actFiles
+async function listVolumes() {
+  const volumeFiles = existsSync(volumesDir) ? await readdir(volumesDir, { withFileTypes: true }) : [];
+  const legacyActFiles = existsSync(actsDir) ? await readdir(actsDir, { withFileTypes: true }) : [];
+  const seen = new Set();
+  const volumes = volumeFiles
+    .filter((item) => item.isFile())
+    .map((item) => item.name.match(/^volume(\d+)\.md$/))
+    .filter(Boolean)
+    .map((match) => {
+      const number = Number(match[1]);
+      seen.add(number);
+      return volumeMeta(number);
+    });
+
+  const legacyVolumes = legacyActFiles
     .filter((item) => item.isFile())
     .map((item) => item.name.match(/^act(\d+)\.md$/))
     .filter(Boolean)
-    .map((match) => actMeta(Number(match[1])))
-    .sort((a, b) => a.number - b.number);
+    .map((match) => Number(match[1]))
+    .filter((number) => !seen.has(number))
+    .map(legacyActMeta);
 
-  if (!acts.length && existsSync(novelPath)) {
-    return [publicAct(actMeta(1))];
+  if (!volumes.length && !legacyVolumes.length && existsSync(novelPath)) {
+    return [publicVolume(volumeMeta(1))];
   }
 
-  return acts.map(publicAct);
+  return [...volumes, ...legacyVolumes].sort((a, b) => a.number - b.number).map(publicVolume);
 }
 
-async function readActMarkdown(act) {
-  if (existsSync(act.path)) return readFile(act.path, 'utf8');
-  if (act.id === 'act1' && existsSync(novelPath)) return readFile(novelPath, 'utf8');
-  return readFile(act.path, 'utf8');
+async function readVolumeMarkdown(volume) {
+  if (existsSync(volume.path)) return readFile(volume.path, 'utf8');
+  const legacyPath = path.join(actsDir, `act${volume.number}.md`);
+  if (existsSync(legacyPath)) return readFile(legacyPath, 'utf8');
+  if (volume.id === 'volume1' && existsSync(novelPath)) return readFile(novelPath, 'utf8');
+  return readFile(volume.path, 'utf8');
 }
 
-async function saveActNovel(act, novel) {
+async function saveVolumeNovel(volume, novel) {
   const codex = await listCodexEntries(codexDir);
   const markdown = serializeNovel(novel, { codexEntries: flattenCodexEntries(codex) });
-  await mkdir(actsDir, { recursive: true });
-  await writeFile(act.path, markdown, 'utf8');
-  return { act: publicAct(act), novel: withStats(parseNovel(markdown)) };
+  await mkdir(volumesDir, { recursive: true });
+  await writeFile(volume.path, markdown, 'utf8');
+  return { volume: publicVolume(volume), novel: withStats(parseNovel(markdown)) };
 }
 
-function getActFromId(actId) {
-  const match = String(actId ?? '').match(/^act(\d+)$/);
+function getVolumeFromId(volumeId) {
+  const match = String(volumeId ?? '').match(/^volume(\d+)$/);
   if (!match) return null;
-  return actMeta(Number(match[1]));
+  return volumeMeta(Number(match[1]));
 }
 
-function actMeta(number) {
+function volumeMeta(number) {
   return {
-    id: `act${number}`,
+    id: `volume${number}`,
     number,
-    label: `Act ${number}`,
-    filename: `act${number}.md`,
-    path: path.join(actsDir, `act${number}.md`)
+    label: `Volume ${number}`,
+    filename: `volume${number}.md`,
+    path: path.join(volumesDir, `volume${number}.md`)
   };
 }
 
-function publicAct(act) {
+function legacyActMeta(number) {
   return {
-    id: act.id,
-    number: act.number,
-    label: act.label,
-    filename: act.filename,
-    path: `datasource/acts/${act.filename}`
+    ...volumeMeta(number),
+    filename: `act${number}.md`,
+    path: path.join(actsDir, `act${number}.md`),
+    legacy: true
   };
 }
 
-function createActMarkdown({ actLabel, title }) {
-  return [`## ${title}`, '', `### Chapter 1: ${actLabel} Opening`, '', '#### Scene 1', '', 'Start writing here...', ''].join('\n');
+function publicVolume(volume) {
+  return {
+    id: volume.id,
+    number: volume.number,
+    label: volume.label,
+    filename: volume.filename,
+    path: volume.legacy ? `datasource/acts/${volume.filename}` : `datasource/volumes/${volume.filename}`
+  };
+}
+
+function convertActIdToVolumeId(id) {
+  const match = String(id ?? '').match(/^act(\d+)$/);
+  return match ? `volume${match[1]}` : id;
+}
+
+function createVolumeMarkdown({ volumeLabel, title }) {
+  return [`## ${title}`, '', `### Chapter 1: ${volumeLabel} Opening`, '', '#### Scene 1', '', 'Start writing here...', ''].join('\n');
 }
 
 async function writeCompiledCodex() {

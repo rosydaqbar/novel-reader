@@ -11,23 +11,24 @@ import { Decoration, DecorationSet } from 'prosemirror-view';
 import { BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
 import {
   compileCodex as compileLocalCodex,
-  createAct as createLocalAct,
+  createVolume as createLocalVolume,
   createCodexEntry as createLocalCodexEntry,
   createStarterNovel,
   deleteCodexEntry as deleteLocalCodexEntry,
   ensureCodexFolders,
   flattenCodexEntries,
   hasHandlePermission,
-  listActs as listLocalActs,
+  listVolumes as listLocalVolumes,
   listCodexEntries as listLocalCodexEntries,
   loadRecentDatasourceHandle,
+  migrateLegacyActsToVolumes,
   openDatasourceFolder,
-  readAct,
+  readVolume,
   readCodexEntry,
   saveRecentDatasourceHandle,
   supportsLocalFiles,
   verifyHandlePermission,
-  writeAct,
+  writeVolume,
   writeCodexEntry as writeLocalCodexEntry
 } from './localDatasource.js';
 import '@fontsource/geist/400.css';
@@ -47,9 +48,9 @@ function App() {
   const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu ?? 'novel');
   const [datasourceHandle, setDatasourceHandle] = useState(null);
   const [recentDatasourceHandle, setRecentDatasourceHandle] = useState(null);
-  const [acts, setActs] = useState([]);
-  const [actsLoaded, setActsLoaded] = useState(false);
-  const [selectedActId, setSelectedActId] = useState(savedUiState.selectedActId ?? 'act1');
+  const [volumes, setVolumes] = useState([]);
+  const [volumesLoaded, setVolumesLoaded] = useState(false);
+  const [selectedVolumeId, setSelectedVolumeId] = useState(savedUiState.selectedVolumeId ?? convertActIdToVolumeId(savedUiState.selectedActId) ?? 'volume1');
   const [novel, setNovel] = useState(null);
   const [selectedChapter, setSelectedChapter] = useState(savedUiState.selectedChapter ?? 0);
   const [status, setStatus] = useState(supportsLocalFiles() ? 'Open or create a local datasource folder' : 'Local folder editing is not supported in this browser');
@@ -110,34 +111,34 @@ function App() {
   }, []);
 
   useEffect(() => {
-    writeUiState({ activeMenu, selectedActId, selectedChapter, codexCategory, selectedCodexId });
-  }, [activeMenu, selectedActId, selectedChapter, codexCategory, selectedCodexId]);
+    writeUiState({ activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId });
+  }, [activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId]);
 
-  const loadActs = async (handle = datasourceHandle) => {
+  const loadVolumes = async (handle = datasourceHandle) => {
     if (!handle) return;
     try {
-      const nextActs = await listLocalActs(handle);
-      setActs(nextActs);
-      setActsLoaded(true);
-      if (nextActs.length && !nextActs.some((act) => act.id === selectedActId)) setSelectedActId(nextActs[0].id);
-      if (!nextActs.length) {
+      const nextVolumes = await listLocalVolumes(handle);
+      setVolumes(nextVolumes);
+      setVolumesLoaded(true);
+      if (nextVolumes.length && !nextVolumes.some((volume) => volume.id === selectedVolumeId)) setSelectedVolumeId(nextVolumes[0].id);
+      if (!nextVolumes.length) {
         setNovel(null);
         setDirty(false);
         setStatus('No novel found in this datasource');
       }
     } catch (error) {
-      setActsLoaded(true);
-      setStatus(`Failed to load acts: ${error.message}`);
+      setVolumesLoaded(true);
+      setStatus(`Failed to load volumes: ${error.message}`);
     }
   };
 
-  const loadNovel = async (nextStatus, useLocalDraft = true, actId = selectedActId, handle = datasourceHandle) => {
+  const loadNovel = async (nextStatus, useLocalDraft = true, volumeId = selectedVolumeId, handle = datasourceHandle) => {
     if (!handle) return;
-    const actFilename = `${actId}.md`;
-    setStatus(`Loading ${actFilename}...`);
+    const volumeFilename = `${volumeId}.md`;
+    setStatus(`Loading ${volumeFilename}...`);
     try {
-      const data = await readAct(handle, actId);
-      const draft = useLocalDraft ? readLocalDraft(novelDraftKey(actId)) : null;
+      const data = await readVolume(handle, volumeId);
+      const draft = useLocalDraft ? readLocalDraft(novelDraftKey(volumeId)) : null;
       if (draft?.novel) {
         setNovel(draft.novel);
         setSelectedChapter(Math.min(draft.selectedChapter ?? 0, Math.max(draft.novel.chapters.length - 1, 0)));
@@ -149,16 +150,16 @@ function App() {
       setNovel(data.novel);
       setSelectedChapter((current) => Math.min(current, Math.max(data.novel.chapters.length - 1, 0)));
       setDirty(false);
-      setStatus(nextStatus ?? `Loaded ${data.act?.filename ?? actFilename}`);
+      setStatus(nextStatus ?? `Loaded ${data.volume?.filename ?? volumeFilename}`);
     } catch (error) {
       setStatus(`Failed to load: ${error.message}`);
     }
   };
 
   useEffect(() => {
-    if (!actsLoaded || !acts.length) return;
-    loadNovel(undefined, true, selectedActId);
-  }, [actsLoaded, acts.length, selectedActId, datasourceHandle]);
+    if (!volumesLoaded || !volumes.length) return;
+    loadNovel(undefined, true, selectedVolumeId);
+  }, [volumesLoaded, volumes.length, selectedVolumeId, datasourceHandle]);
 
   useEffect(() => {
     if (!datasourceHandle || codex) return;
@@ -167,12 +168,13 @@ function App() {
 
   useEffect(() => {
     if (!novel || !dirty) return;
-    writeLocalDraft(novelDraftKey(selectedActId), { novel, selectedChapter, savedAt: new Date().toISOString() });
+    writeLocalDraft(novelDraftKey(selectedVolumeId), { novel, selectedChapter, savedAt: new Date().toISOString() });
     setStatus('Saved locally');
-  }, [novel, selectedChapter, dirty, selectedActId]);
+  }, [novel, selectedChapter, dirty, selectedVolumeId]);
 
   const selected = novel?.chapters[selectedChapter];
-  const selectedAct = acts.find((act) => act.id === selectedActId) ?? { id: selectedActId, label: `Act ${selectedActId.replace('act', '')}`, filename: `${selectedActId}.md` };
+  const selectedVolume = volumes.find((volume) => volume.id === selectedVolumeId) ?? { id: selectedVolumeId, label: `Volume ${selectedVolumeId.replace('volume', '')}`, filename: `${selectedVolumeId}.md` };
+  const legacyVolumes = volumes.filter((volume) => volume.legacy);
   const selectedCodexCategory = codexCategories.find((category) => category.id === codexCategory) ?? codexCategories[0];
   const chapterCount = novel?.chapters.length ?? 0;
   const codexOptions = useMemo(() => getCodexOptions(codex), [codex]);
@@ -348,19 +350,19 @@ function App() {
   const activateDatasource = async (handle, nextStatus = 'Loaded datasource') => {
     await ensureCodexFolders(handle);
     await saveRecentDatasourceHandle(handle);
-    const nextActs = await listLocalActs(handle);
+    const nextVolumes = await listLocalVolumes(handle);
     const nextCodex = await listLocalCodexEntries(handle);
-    const nextActId = nextActs.some((act) => act.id === selectedActId) ? selectedActId : nextActs[0]?.id;
+    const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id;
 
     setDatasourceHandle(handle);
     setCodex(nextCodex);
-    setActs(nextActs);
-    setActsLoaded(true);
+    setVolumes(nextVolumes);
+    setVolumesLoaded(true);
 
-    if (nextActId) {
-      const act = nextActs.find((item) => item.id === nextActId);
-      setSelectedActId(nextActId);
-      await loadNovel(`${nextStatus}: ${act?.filename ?? `${nextActId}.md`}`, true, nextActId, handle);
+    if (nextVolumeId) {
+      const volume = nextVolumes.find((item) => item.id === nextVolumeId);
+      setSelectedVolumeId(nextVolumeId);
+      await loadNovel(`${nextStatus}: ${volume?.filename ?? `${nextVolumeId}.md`}`, true, nextVolumeId, handle);
     } else {
       setNovel(null);
       setDirty(false);
@@ -421,32 +423,50 @@ function App() {
   };
 
   const saveNovel = async () => {
-    setStatus(`Saving ${selectedAct.filename}...`);
+    setStatus(`Saving ${selectedVolume.filename}...`);
     try {
-      const data = await writeAct(datasourceHandle, selectedActId, novel, flattenCodexEntries(codex));
-      localStorage.removeItem(novelDraftKey(selectedActId));
+      const data = await writeVolume(datasourceHandle, selectedVolumeId, novel, flattenCodexEntries(codex));
+      localStorage.removeItem(novelDraftKey(selectedVolumeId));
       setNovel(data.novel);
       setDirty(false);
-      setStatus(`Updated ${data.act?.filename ?? selectedAct.filename}`);
+      setStatus(`Updated ${data.volume?.filename ?? selectedVolume.filename}`);
     } catch (error) {
       setStatus(`Save failed: ${error.message}`);
     }
   };
 
-  const addAct = async () => {
-    setStatus('Creating act...');
+  const addVolume = async () => {
+    setStatus('Creating volume...');
     try {
-      const act = await createLocalAct(datasourceHandle, novel?.title || 'Untitled Novel');
-      const nextActs = await listLocalActs(datasourceHandle);
-      const data = await readAct(datasourceHandle, act.id);
-      setActs(nextActs);
-      setSelectedActId(act.id);
+      const volume = await createLocalVolume(datasourceHandle, novel?.title || 'Untitled Novel');
+      const nextVolumes = await listLocalVolumes(datasourceHandle);
+      const data = await readVolume(datasourceHandle, volume.id);
+      setVolumes(nextVolumes);
+      setSelectedVolumeId(volume.id);
       setNovel(data.novel);
       setSelectedChapter(0);
       setDirty(false);
-      setStatus(`Created ${act.filename}`);
+      setStatus(`Created ${volume.filename}`);
     } catch (error) {
       setStatus(`Create failed: ${error.message}`);
+    }
+  };
+
+  const migrateLegacyVolumes = async () => {
+    if (!legacyVolumes.length) return;
+    const count = legacyVolumes.length;
+    if (!window.confirm(`Migrate ${count} legacy act ${count === 1 ? 'file' : 'files'} into volumes/? This copies act*.md to volume*.md and keeps the old files untouched.`)) return;
+
+    setStatus('Migrating legacy act files...');
+    try {
+      const result = await migrateLegacyActsToVolumes(datasourceHandle);
+      const nextVolumes = await listLocalVolumes(datasourceHandle);
+      setVolumes(nextVolumes);
+      const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id ?? 'volume1';
+      setSelectedVolumeId(nextVolumeId);
+      await loadNovel(`Migrated ${result.migrated} ${result.migrated === 1 ? 'file' : 'files'} to volumes/`, false, nextVolumeId);
+    } catch (error) {
+      setStatus(`Migration failed: ${error.message}`);
     }
   };
 
@@ -459,26 +479,26 @@ function App() {
       await saveRecentDatasourceHandle(handle);
       await createStarterNovel(handle, title);
       await ensureCodexFolders(handle);
-      const nextActs = await listLocalActs(handle);
-      const data = await readAct(handle, 'act1');
+      const nextVolumes = await listLocalVolumes(handle);
+      const data = await readVolume(handle, 'volume1');
       const nextCodex = await listLocalCodexEntries(handle);
-      setActs(nextActs);
-      setActsLoaded(true);
+      setVolumes(nextVolumes);
+      setVolumesLoaded(true);
       setCodex(nextCodex);
-      setSelectedActId('act1');
+      setSelectedVolumeId('volume1');
       setNovel(data.novel);
       setSelectedChapter(0);
       setDirty(false);
-      setStatus('Created act1.md');
+      setStatus('Created volume1.md');
     } catch (error) {
       setStatus(`Create failed: ${error.message}`);
     }
   };
 
-  const changeAct = (actId) => {
-    if (actId === selectedActId) return;
+  const changeVolume = (volumeId) => {
+    if (volumeId === selectedVolumeId) return;
     setSelectedChapter(0);
-    setSelectedActId(actId);
+    setSelectedVolumeId(volumeId);
   };
 
   const updateChapter = (chapterId, patch) => {
@@ -526,7 +546,7 @@ function App() {
 
   const deleteScene = (chapterId, sceneId) => {
     const scene = novel.chapters.find((chapter) => chapter.id === chapterId)?.scenes.find((item) => item.id === sceneId);
-    if (!window.confirm(`Delete ${scene?.heading || 'this scene'}? This change is not written to ${selectedAct.filename} until you save.`)) {
+    if (!window.confirm(`Delete ${scene?.heading || 'this scene'}? This change is not written to ${selectedVolume.filename} until you save.`)) {
       return;
     }
 
@@ -571,7 +591,7 @@ function App() {
     const chapter = novel.chapters.find((item) => item.id === chapterId);
     if (!chapter) return;
 
-    if (!window.confirm(`Delete Chapter ${chapter.chapterNumber}: ${chapter.title}? This change is not written to ${selectedAct.filename} until you save.`)) {
+    if (!window.confirm(`Delete Chapter ${chapter.chapterNumber}: ${chapter.title}? This change is not written to ${selectedVolume.filename} until you save.`)) {
       return;
     }
 
@@ -585,16 +605,16 @@ function App() {
 
   const discardChanges = () => {
     if (!dirty) return;
-    if (!window.confirm(`Discard the local draft and reload ${selectedAct.filename} from disk?`)) return;
-    localStorage.removeItem(novelDraftKey(selectedActId));
-    loadNovel('Discarded local draft', false, selectedActId);
+    if (!window.confirm(`Discard the local draft and reload ${selectedVolume.filename} from disk?`)) return;
+    localStorage.removeItem(novelDraftKey(selectedVolumeId));
+    loadNovel('Discarded local draft', false, selectedVolumeId);
   };
 
   if (!datasourceHandle) {
     return <WelcomeEmptyState onCreate={createDatasource} onOpen={openDatasource} onRestore={recentDatasourceHandle ? restoreRecentDatasource : null} status={status} supported={supportsLocalFiles()} />;
   }
 
-  if (!novel && actsLoaded && !acts.length) {
+  if (!novel && volumesLoaded && !volumes.length) {
     return <WelcomeEmptyState onCreate={() => createNovel(datasourceHandle)} status={status} supported={supportsLocalFiles()} />;
   }
 
@@ -628,20 +648,20 @@ function App() {
         </div>
         {activeMenu === 'novel' ? (
           <>
-            <div className="actTabs" role="tablist" aria-label="Acts">
-              {acts.map((act) => (
+            <div className="volumeTabs" role="tablist" aria-label="Volumes">
+              {volumes.map((volume) => (
                 <button
-                  className={selectedActId === act.id ? 'actTab active' : 'actTab'}
-                  key={act.id}
-                  onClick={() => changeAct(act.id)}
+                  className={selectedVolumeId === volume.id ? 'volumeTab active' : 'volumeTab'}
+                  key={volume.id}
+                  onClick={() => changeVolume(volume.id)}
                   type="button"
                 >
-                  <span>{act.label}</span>
-                  <small>{act.filename}</small>
+                  <span>{volume.label}</span>
+                  <small>{volume.filename}</small>
                 </button>
               ))}
-              <button className="button sidebarAction" onClick={addAct} type="button">
-                Add act
+              <button className="button sidebarAction" onClick={addVolume} type="button">
+                Add volume
               </button>
             </div>
             <div className="stats">
@@ -651,6 +671,15 @@ function App() {
                 Add chapter
               </button>
             </div>
+            {legacyVolumes.length > 0 && (
+              <div className="migrationNotice">
+                <strong>Legacy act files detected</strong>
+                <p>{legacyVolumes.length} old act {legacyVolumes.length === 1 ? 'file is' : 'files are'} still being read from `acts/`. Migrate them to `volumes/` when you are ready.</p>
+                <button className="button secondary" onClick={migrateLegacyVolumes} type="button">
+                  Migrate to volumes
+                </button>
+              </div>
+            )}
             <nav className="chapterList" aria-label="Chapters">
               {novel.chapters.map((chapter, index) => (
                 <button
@@ -756,7 +785,7 @@ function App() {
           <>
             <header className="topbar">
               <div>
-                <p className="eyebrow">{selectedAct.label}</p>
+                <p className="eyebrow">{selectedVolume.label}</p>
                 <h1>{novel.title || 'Imported Novel'}</h1>
               </div>
               <div className="actions">
@@ -765,7 +794,7 @@ function App() {
                   Discard
                 </button>
                 <button className="button primary" disabled={!dirty} onClick={saveNovel} type="button">
-                  Update {selectedAct.filename}
+                  Update {selectedVolume.filename}
                 </button>
               </div>
             </header>
@@ -1528,11 +1557,16 @@ function writeUiState(state) {
   }
 }
 
-function novelDraftKey(actId) {
-  return `${DRAFT_PREFIX}${actId}`;
+function novelDraftKey(volumeId) {
+  return `${DRAFT_PREFIX}${volumeId}`;
 }
 
-function readLocalDraft(key = novelDraftKey('act1')) {
+function convertActIdToVolumeId(id) {
+  const match = String(id ?? '').match(/^act(\d+)$/);
+  return match ? `volume${match[1]}` : id;
+}
+
+function readLocalDraft(key = novelDraftKey('volume1')) {
   try {
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw) : null;
@@ -1543,7 +1577,7 @@ function readLocalDraft(key = novelDraftKey('act1')) {
 }
 
 function writeLocalDraft(keyOrDraft, maybeDraft) {
-  const key = maybeDraft ? keyOrDraft : novelDraftKey('act1');
+  const key = maybeDraft ? keyOrDraft : novelDraftKey('volume1');
   const draft = maybeDraft ?? keyOrDraft;
   try {
     localStorage.setItem(key, JSON.stringify(draft));
