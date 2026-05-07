@@ -111,6 +111,14 @@ export async function writeVolume(rootHandle, volumeId, novel, codexEntries) {
   return { volume, novel: withStats(parseNovel(markdown)) };
 }
 
+export async function deleteVolume(rootHandle, volume) {
+  const target = typeof volume === 'string' ? getVolumeFromId(volume) : volume;
+  const directoryName = target.legacy ? 'acts' : 'volumes';
+  const directoryHandle = await getDirectoryOrNull(rootHandle, directoryName);
+  if (!directoryHandle) return;
+  await directoryHandle.removeEntry(target.filename);
+}
+
 export async function migrateLegacyActsToVolumes(rootHandle) {
   const legacyActsDir = await getDirectoryOrNull(rootHandle, 'acts');
   if (!legacyActsDir) return { migrated: 0, skipped: 0 };

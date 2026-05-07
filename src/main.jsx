@@ -8,13 +8,14 @@ import Paragraph from '@tiptap/extension-paragraph';
 import Text from '@tiptap/extension-text';
 import { Plugin, PluginKey } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
-import { BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
+import { Book, BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
 import {
   compileCodex as compileLocalCodex,
   createVolume as createLocalVolume,
   createCodexEntry as createLocalCodexEntry,
   createStarterNovel,
   deleteCodexEntry as deleteLocalCodexEntry,
+  deleteVolume as deleteLocalVolume,
   ensureCodexFolders,
   flattenCodexEntries,
   hasHandlePermission,
@@ -53,7 +54,7 @@ function App() {
   const [selectedVolumeId, setSelectedVolumeId] = useState(savedUiState.selectedVolumeId ?? convertActIdToVolumeId(savedUiState.selectedActId) ?? 'volume1');
   const [novel, setNovel] = useState(null);
   const [selectedChapter, setSelectedChapter] = useState(savedUiState.selectedChapter ?? 0);
-  const [status, setStatus] = useState(supportsLocalFiles() ? 'Open or create a local datasource folder' : 'Local folder editing is not supported in this browser');
+  const [status, setStatus] = useState(supportsLocalFiles() ? 'Open or create a local datasource folder' : 'This app currently supports Chromium browsers only.');
   const [dirty, setDirty] = useState(false);
   const selectedChapterRef = useRef(null);
   const [codex, setCodex] = useState(null);
@@ -264,6 +265,7 @@ function App() {
   };
 
   const changeCodexCategory = (category) => {
+    if (category === codexCategory) return;
     setCodexCategory(category);
     setSelectedCodexId(codex?.[category]?.[0]?.id ?? null);
     setCodexEntry(null);
@@ -449,6 +451,35 @@ function App() {
       setStatus(`Created ${volume.filename}`);
     } catch (error) {
       setStatus(`Create failed: ${error.message}`);
+    }
+  };
+
+  const deleteVolume = async () => {
+    if (!selectedVolume) return;
+    if (!window.confirm(`Delete ${selectedVolume.filename}? This removes the markdown file from your local datasource folder.`)) return;
+
+    setStatus(`Deleting ${selectedVolume.filename}...`);
+    try {
+      await deleteLocalVolume(datasourceHandle, selectedVolume);
+      localStorage.removeItem(novelDraftKey(selectedVolume.id));
+      const nextVolumes = await listLocalVolumes(datasourceHandle);
+      setVolumes(nextVolumes);
+
+      if (!nextVolumes.length) {
+        setNovel(null);
+        setDirty(false);
+        setVolumesLoaded(true);
+        setStatus(`Deleted ${selectedVolume.filename}`);
+        return;
+      }
+
+      const currentIndex = volumes.findIndex((volume) => volume.id === selectedVolume.id);
+      const nextVolume = nextVolumes[Math.max(0, Math.min(currentIndex, nextVolumes.length - 1))];
+      setSelectedVolumeId(nextVolume.id);
+      setSelectedChapter(0);
+      await loadNovel(`Deleted ${selectedVolume.filename}`, false, nextVolume.id);
+    } catch (error) {
+      setStatus(`Delete failed: ${error.message}`);
     }
   };
 
@@ -656,7 +687,10 @@ function App() {
                   onClick={() => changeVolume(volume.id)}
                   type="button"
                 >
-                  <span>{volume.label}</span>
+                  <span className="volumeTabLabel">
+                    <Book size={15} strokeWidth={2.1} aria-hidden="true" />
+                    <span>{volume.label}</span>
+                  </span>
                   <small>{volume.filename}</small>
                 </button>
               ))}
@@ -701,9 +735,6 @@ function App() {
         ) : (
           <>
             <div className="stats">
-              <button className="button sidebarAction" onClick={addCodexEntry} type="button">
-                Add entry
-              </button>
               <button className="button sidebarAction compileAction" onClick={compileCodex} type="button">
                 Compile codex.md
               </button>
@@ -733,6 +764,9 @@ function App() {
               />
               <SearchableFilter label="tags" options={codexOptions.tags} value={codexTagFilter} onChange={setCodexTagFilter} />
               <SearchableFilter label="aliases" options={codexOptions.aliases} value={codexAliasFilter} onChange={setCodexAliasFilter} />
+              <button className="button sidebarAction" onClick={addCodexEntry} type="button">
+                Add entry
+              </button>
               {(codexSearch || codexTagFilter || codexAliasFilter) && (
                 <button
                   className="button ghost filterClear"
@@ -792,6 +826,9 @@ function App() {
                 <span className={dirty ? 'saveState dirty' : 'saveState'}>{status}</span>
                 <button className="button secondary" disabled={!dirty} onClick={discardChanges} type="button">
                   Discard
+                </button>
+                <button className="button ghost dangerText" onClick={deleteVolume} type="button">
+                  Remove volume
                 </button>
                 <button className="button primary" disabled={!dirty} onClick={saveNovel} type="button">
                   Update {selectedVolume.filename}
@@ -988,6 +1025,7 @@ function CodexEditor({ category, options, dirty, entry, status, onChange, onCrea
           </div>
 
           <div className="flagRow">
+            <span className="flagRowCaption">AI Context</span>
             <label>
               <input
                 checked={entry.alwaysIncludeInContext}
@@ -1269,6 +1307,24 @@ function CodexMentionedSection({ entries, onOpen, onHover, onLeave }) {
 }
 
 function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
+  if (!supported) {
+    return (
+      <main className="welcomeShell">
+        <section className="welcomeCard">
+          <p className="eyebrow">Novel Reader Editor</p>
+          <h1>Chromium browser required</h1>
+          <p>
+            This editor saves markdown directly to a local folder using the browser File System Access API. That workflow is currently supported in Chromium browsers only.
+          </p>
+          <p>Use Chrome, Edge, Brave, or another Chromium-based browser to open or create a datasource.</p>
+          <div className="welcomeActions">
+            <span>{status}</span>
+          </div>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="welcomeShell">
       <section className="welcomeCard">

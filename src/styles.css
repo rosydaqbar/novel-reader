@@ -39,6 +39,9 @@
   --font-meta: 12px;
   --button-height: 36px;
   --button-padding: 8px 12px;
+  --radius: 8px;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --interaction-transition: background-color 180ms var(--ease-out), color 180ms var(--ease-out), border-color 180ms var(--ease-out), box-shadow 180ms var(--ease-out), opacity 180ms var(--ease-out), transform 180ms var(--ease-out);
   color: var(--text);
   background: var(--bg);
   font-family: Geist, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -48,6 +51,163 @@
 
 * {
   box-sizing: border-box;
+}
+
+@keyframes appearSoft {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.99);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes appearSoftLeft {
+  from {
+    opacity: 0;
+    transform: translateX(-8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .welcomeCard,
+  .topbar,
+  .chapterPanel,
+  .chapterHero,
+  .sceneCard,
+  .codexBlank,
+  .codexHoverCard,
+  .comboList {
+    animation: appearSoft 420ms var(--ease-out) both;
+  }
+
+  .appMenu,
+  .brand,
+  .sidebar > .volumeTabs,
+  .sidebar > .actTabs,
+  .sidebar > .stats,
+  .sidebar > .migrationNotice,
+  .sidebar > .codexTabs,
+  .sidebar > .codexFilters,
+  .chapterList {
+    animation: appearSoftLeft 380ms var(--ease-out) both;
+  }
+
+  .brand {
+    animation-delay: 40ms;
+  }
+
+  .sidebar > .volumeTabs,
+  .sidebar > .actTabs,
+  .sidebar > .stats,
+  .sidebar > .codexTabs {
+    animation-delay: 80ms;
+  }
+
+  .sidebar > .migrationNotice,
+  .sidebar > .codexFilters {
+    animation-delay: 120ms;
+  }
+
+  .chapterList {
+    animation-delay: 160ms;
+  }
+
+  .chapterLink,
+  .volumeTab,
+  .actTab,
+  .codexTab,
+  .sceneCard,
+  .chapterMentionChip,
+  .chip,
+  .comboList button {
+    animation: appearSoft 300ms var(--ease-out) both;
+  }
+
+  .chapterLink:nth-child(1),
+  .volumeTab:nth-child(1),
+  .actTab:nth-child(1),
+  .codexTab:nth-child(1),
+  .sceneCard:nth-child(1) {
+    animation-delay: 40ms;
+  }
+
+  .chapterLink:nth-child(2),
+  .volumeTab:nth-child(2),
+  .actTab:nth-child(2),
+  .codexTab:nth-child(2),
+  .sceneCard:nth-child(2) {
+    animation-delay: 80ms;
+  }
+
+  .chapterLink:nth-child(3),
+  .volumeTab:nth-child(3),
+  .actTab:nth-child(3),
+  .codexTab:nth-child(3),
+  .sceneCard:nth-child(3) {
+    animation-delay: 120ms;
+  }
+
+  .chapterLink:nth-child(n + 4),
+  .volumeTab:nth-child(n + 4),
+  .actTab:nth-child(n + 4),
+  .codexTab:nth-child(n + 4),
+  .sceneCard:nth-child(n + 4) {
+    animation-delay: 160ms;
+  }
+}
+
+button,
+input,
+select,
+textarea,
+[class] {
+  border-radius: var(--radius);
+  corner-shape: squircle;
+}
+
+button,
+input,
+select,
+textarea,
+a,
+[role="button"],
+.appMenuItem,
+.volumeTab,
+.actTab,
+.codexTab,
+.filterComboButton,
+.chapterLink,
+.button,
+.sceneCard,
+.chapterHero,
+.codexBlank,
+.welcomeCard,
+.chip,
+.chapterMentionChip,
+.comboList button,
+.codexHoverCard,
+.codexHoverEntry,
+.migrationNotice,
+.emptyMenuState {
+  transition: var(--interaction-transition);
+}
+
+button:active:not(:disabled),
+[role="button"]:active,
+.chapterLink:active,
+.chip:active,
+.chapterMentionChip:active,
+.comboList button:active {
+  transform: translateY(1px) scale(0.995);
 }
 
 * {
@@ -72,13 +232,15 @@
 
 *::-webkit-scrollbar-track {
   background: transparent;
-  border-radius: 0;
+  border-radius: var(--radius);
+  corner-shape: squircle;
 }
 
 *::-webkit-scrollbar-thumb {
   background: transparent;
   border: 2px solid var(--bg);
-  border-radius: 0;
+  border-radius: var(--radius);
+  corner-shape: squircle;
 }
 
 *::-webkit-scrollbar-thumb:hover {
@@ -231,6 +393,8 @@ label {
 }
 
 .sidebar > .codexFilters {
+  position: relative;
+  z-index: 5;
   background: var(--surface);
 }
 
@@ -262,17 +426,13 @@ label {
   font-weight: 400;
   min-height: var(--button-height);
   padding: var(--button-padding);
-  transition: 160ms ease;
+  transition: var(--interaction-transition);
 }
 
 .appMenuItem:hover,
 .appMenuItem.active {
   background: var(--selected-bg);
   color: var(--selected-text);
-}
-
-.appMenuItem.active {
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .volumeTabs,
@@ -308,6 +468,7 @@ label {
   font-size: var(--font-meta);
 }
 
+.volumeTabLabel,
 .codexTabLabel {
   display: inline-flex;
   align-items: center;
@@ -315,6 +476,7 @@ label {
   min-width: 0;
 }
 
+.volumeTabLabel svg,
 .codexTabLabel svg,
 .entryType svg {
   flex: 0 0 auto;
@@ -333,24 +495,6 @@ label {
 .codexTab.active {
   background: var(--selected-bg);
   color: var(--selected-text);
-}
-
-.volumeTab.active,
-.actTab.active,
-.codexTab.active {
-  box-shadow: inset 3px 0 0 var(--accent);
-}
-
-.codexTabCharacter.active {
-  box-shadow: inset 3px 0 0 var(--character);
-}
-
-.codexTabLocation.active {
-  box-shadow: inset 3px 0 0 var(--location);
-}
-
-.codexTabLore.active {
-  box-shadow: inset 3px 0 0 var(--lore);
 }
 
 .codexFilters {
@@ -399,13 +543,13 @@ label {
   color: var(--selected-text);
 }
 
-.filterComboButton.active {
-  box-shadow: inset 3px 0 0 var(--accent);
+.filterComboList {
+  z-index: 50;
+  margin-top: 6px;
 }
 
-.filterComboList {
-  position: static;
-  margin-top: 6px;
+.filterCombo:focus-within {
+  z-index: 60;
 }
 
 .filterComboList input {
@@ -497,16 +641,12 @@ label {
   padding: 13px;
   text-align: left;
   cursor: pointer;
-  transition: 160ms ease;
+  transition: var(--interaction-transition);
 }
 
 .chapterLink:hover,
 .chapterLink.active {
   background: var(--selected-bg);
-}
-
-.chapterLink.active {
-  box-shadow: inset 3px 0 0 var(--accent);
 }
 
 .chapterLink span,
@@ -552,18 +692,6 @@ label {
 .codexHoverEntryHeader .entryTypeLore,
 .codexTabLore .codexTabLabel {
   color: var(--lore);
-}
-
-.chapterLinkCharacter.active {
-  box-shadow: inset 3px 0 0 var(--character);
-}
-
-.chapterLinkLocation.active {
-  box-shadow: inset 3px 0 0 var(--location);
-}
-
-.chapterLinkLore.active {
-  box-shadow: inset 3px 0 0 var(--lore);
 }
 
 .chapterLink strong {
@@ -624,10 +752,23 @@ label {
   font-weight: 400;
   min-height: var(--button-height);
   padding: var(--button-padding);
-  transition: 160ms ease;
+  transition: var(--interaction-transition);
 }
 
 .button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.appMenuItem:hover,
+.volumeTab:hover,
+.actTab:hover,
+.codexTab:hover,
+.filterComboButton:hover,
+.chapterLink:hover,
+.chip:hover,
+.chapterMentionChip:hover,
+.comboList button:hover,
+.collapseButton:hover {
   transform: translateY(-1px);
 }
 
@@ -747,6 +888,15 @@ label {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.flagRowCaption {
+  color: var(--text);
+  font-size: var(--font-ui);
+}
+
+.flagRow .iconButton {
+  margin-left: auto;
 }
 
 .flagRow input {
@@ -1265,5 +1415,89 @@ label {
     align-items: stretch;
     flex-direction: column;
   }
+}
+
+button,
+input,
+select,
+textarea,
+.welcomeCard,
+.appMenuItem,
+.volumeTab,
+.actTab,
+.codexTab,
+.codexFilters input,
+.valuePickerControls input,
+.valuePickerControls select,
+.filterComboButton,
+.stats span,
+.chapterMeta span,
+.emptyMenuState,
+.chapterLink,
+.topbar,
+.button,
+.chapterHero,
+.sceneCard,
+.codexEditorGrid input,
+.chip,
+.comboList,
+.comboList button,
+.chapterMentionChip,
+.collapseButton,
+.codexMention,
+.codexHoverCard,
+.codexHoverEntry,
+.matchBadge,
+.staticChip,
+.codexBlank,
+.codexBlankIcon,
+.migrationNotice {
+  border-radius: var(--radius);
+  corner-shape: squircle;
+}
+
+.chapterList .chapterLink,
+.comboList button {
+  border-radius: 0;
+  corner-shape: auto;
+}
+
+.sidebar > .appMenu,
+.sidebar > .brand,
+.sidebar > .volumeTabs,
+.sidebar > .actTabs,
+.sidebar > .stats,
+.sidebar > .migrationNotice,
+.sidebar > .codexTabs,
+.sidebar > .codexFilters,
+.sidebar > .chapterList {
+  border-radius: 0;
+  corner-shape: auto;
+}
+
+.chapterPanel > .chapterHero {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  corner-shape: auto;
+}
+
+.chapterPanel > .sceneCard {
+  border-radius: 0;
+  corner-shape: auto;
+}
+
+.chapterPanel > .sceneCard:last-of-type {
+  border-bottom-left-radius: var(--radius);
+  border-bottom-right-radius: var(--radius);
+  corner-shape: squircle;
+}
+
+.sceneCard .sceneHeader,
+.sceneCard .tiptapEditor,
+.chapterHero .chapterCodexMentions,
+.codexHero .codexEditorGrid,
+.codexHero .flagRow {
+  border-radius: 0;
+  corner-shape: auto;
 }
 

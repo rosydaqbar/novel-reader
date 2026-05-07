@@ -21,13 +21,13 @@ The app uses the browser File System Access API.
 - Markdown files are read and written directly in that folder.
 - No manuscript or codex data is uploaded to the app host.
 
-Best-supported browsers:
+Supported browsers:
 
 - Chrome
 - Edge
 - Brave
 
-Firefox and Safari do not currently support the full local folder write workflow.
+Firefox and Safari are blocked because they do not support the required writable local folder workflow.
 
 ## Novel
 
