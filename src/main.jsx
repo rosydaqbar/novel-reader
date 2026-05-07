@@ -44,6 +44,93 @@ const codexCategories = [
   { id: 'lore', label: 'Lore', type: 'lore' }
 ];
 
+function RootShell() {
+  return (
+    <>
+      <InterfaceBackground />
+      <App />
+    </>
+  );
+}
+
+function InterfaceBackground() {
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    const context = canvas.getContext('2d');
+    if (!context) return undefined;
+
+    let frameId;
+    let width = 0;
+    let height = 0;
+    let time = 0;
+    const pointer = { x: 0, y: 0 };
+    const spacing = 35;
+
+    const resize = () => {
+      const ratio = Math.min(window.devicePixelRatio || 1, 2);
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = Math.floor(width * ratio);
+      canvas.height = Math.floor(height * ratio);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+      context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    };
+
+    const movePointer = (event) => {
+      pointer.x = (event.clientX / window.innerWidth - 0.5) * 10;
+      pointer.y = (event.clientY / window.innerHeight - 0.5) * 10;
+    };
+
+    const draw = () => {
+      time += 0.006;
+      context.clearRect(0, 0, width, height);
+      context.fillStyle = '#161618';
+      context.fillRect(0, 0, width, height);
+
+      const pulse = 0.45 + Math.sin(time) * 0.12;
+      const centerX = width / 2;
+      const centerY = height / 2;
+
+      for (let y = spacing / 2; y < height; y += spacing) {
+        for (let x = spacing / 2; x < width; x += spacing) {
+          const dx = x - centerX;
+          const dy = y - centerY;
+          const distance = Math.sqrt(dx * dx + dy * dy);
+          const fade = Math.max(0, 1 - distance / Math.max(width, height));
+          const driftX = Math.sin(time + y * 0.012) * 1.4 + pointer.x * fade;
+          const driftY = Math.cos(time + x * 0.012) * 1.4 + pointer.y * fade;
+          const alpha = Math.min(0.3, 0.035 + fade * pulse * 0.16);
+
+          context.beginPath();
+          context.fillStyle = `rgba(93, 255, 173, ${alpha})`;
+          context.arc(x + driftX, y + driftY, 1.1 + fade * 0.7, 0, Math.PI * 2);
+          context.fill();
+        }
+      }
+
+      frameId = window.requestAnimationFrame(draw);
+    };
+
+    resize();
+    draw();
+    window.addEventListener('resize', resize);
+    window.addEventListener('pointermove', movePointer);
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.removeEventListener('resize', resize);
+      window.removeEventListener('pointermove', movePointer);
+    };
+  }, []);
+
+  return <canvas ref={canvasRef} className="interfaceBackdrop" aria-hidden="true" />;
+}
+
 function App() {
   const savedUiState = useMemo(() => readUiState(), []);
   const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu ?? 'novel');
@@ -827,7 +914,7 @@ function App() {
                 <button className="button secondary" disabled={!dirty} onClick={discardChanges} type="button">
                   Discard
                 </button>
-                <button className="button ghost dangerText" onClick={deleteVolume} type="button">
+                <button className="button secondary dangerText" onClick={deleteVolume} type="button">
                   Remove volume
                 </button>
                 <button className="button primary" disabled={!dirty} onClick={saveNovel} type="button">
@@ -850,7 +937,7 @@ function App() {
                   onChange={(event) => updateChapter(selected.id, { title: event.target.value })}
                   aria-label="Chapter title"
                 />
-                <button aria-label="Delete chapter" className="button ghost dangerText iconButton" onClick={() => deleteChapter(selected.id)} type="button">
+                <button aria-label="Delete chapter" className="button secondary dangerText iconButton" onClick={() => deleteChapter(selected.id)} type="button">
                   <Trash2 size={14} strokeWidth={2.2} aria-hidden="true" />
                 </button>
               </div>
@@ -1042,7 +1129,7 @@ function CodexEditor({ category, options, dirty, entry, status, onChange, onCrea
               <input checked={entry.noAutoInclude} onChange={(event) => onChange({ noAutoInclude: event.target.checked })} type="checkbox" />
               No auto include
             </label>
-            <button aria-label="Delete entry" className="button ghost dangerText iconButton" onClick={onDelete} type="button">
+            <button aria-label="Delete entry" className="button secondary dangerText iconButton" onClick={onDelete} type="button">
               <Trash2 size={14} strokeWidth={2.2} aria-hidden="true" />
             </button>
           </div>
@@ -1203,7 +1290,7 @@ function SceneEditor({ scene, mentionIndex, onChange, onDelete, onMentionHover, 
           {!expanded && <span className="sceneSummary">{scene.paragraphs.length} paragraphs</span>}
         </div>
         <div className="sceneActions">
-          <button aria-label="Delete scene" className="button ghost dangerText iconButton" onClick={onDelete} type="button">
+          <button aria-label="Delete scene" className="button secondary dangerText iconButton" onClick={onDelete} type="button">
             <Trash2 size={14} strokeWidth={2.2} aria-hidden="true" />
           </button>
         </div>
@@ -1650,4 +1737,4 @@ function formatDateTime(value) {
   }).format(new Date(value));
 }
 
-createRoot(document.getElementById('root')).render(<App />);
+createRoot(document.getElementById('root')).render(<RootShell />);
