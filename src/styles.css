@@ -124,6 +124,48 @@ label {
   color: var(--muted);
 }
 
+.welcomeShell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 24px;
+}
+
+.welcomeCard {
+  width: min(620px, 100%);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  padding: clamp(24px, 5vw, 44px);
+}
+
+.welcomeCard h1 {
+  margin: 0 0 16px;
+  color: var(--text);
+  font-size: clamp(28px, 5vw, 48px);
+  letter-spacing: -0.055em;
+  line-height: 1.05;
+}
+
+.welcomeCard p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.618;
+}
+
+.welcomeActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.welcomeActions span {
+  color: var(--muted);
+  font-size: var(--font-ui);
+}
+
 .shell {
   display: grid;
   grid-template-columns: 450px minmax(0, 1fr);
@@ -400,10 +442,18 @@ label {
 }
 
 .emptyMenuState {
-  border: 1px dashed var(--border-strong);
+  display: grid;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
   border-radius: 0;
   color: var(--muted);
-  padding: 16px;
+  padding: 18px;
+}
+
+.emptyMenuState p {
+  margin: 0;
+  font-size: var(--font-ui);
+  line-height: 1.618;
 }
 
 .chapterLink {
@@ -1100,26 +1150,47 @@ label {
 
 .codexBlank {
   display: grid;
+  gap: 14px;
   align-content: center;
-  min-height: calc(100vh - 56px);
-  max-width: 980px;
-  margin: 0 auto;
+  width: min(620px, 100%);
+  margin: 72px auto 0;
   border: 1px dashed var(--border-strong);
   border-radius: 0;
   background: var(--subtle-bg);
   color: var(--muted);
-  padding: clamp(20px, 4vw, 48px);
+  padding: 28px;
+}
+
+.codexBlankIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  background: var(--subtle-bg-strong);
+}
+
+.codexBlankIcon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .codexBlank h1 {
-  margin: 0 0 10px;
+  margin: 0;
   color: var(--text);
-  font-size: clamp(28px, 5vw, 52px);
+  font-size: clamp(24px, 3vw, 34px);
   letter-spacing: -0.06em;
 }
 
-.codexBlank p:last-child {
+.codexBlank p {
   margin: 0;
+  max-width: 540px;
+  line-height: 1.618;
+}
+
+.codexBlank .button {
+  justify-self: start;
+  margin-top: 8px;
 }
 
 @media (max-width: 900px) {

@@ -22,11 +22,12 @@ app.get('/api/acts', async (_request, response) => {
   response.json({ acts: await listActs() });
 });
 
-app.post('/api/acts', async (_request, response) => {
+app.post('/api/acts', async (request, response) => {
   const acts = await listActs();
   const nextNumber = Math.max(0, ...acts.map((act) => act.number)) + 1;
   const act = actMeta(nextNumber);
-  const markdown = createActMarkdown(act.label);
+  const title = String(request.body?.title ?? '').trim() || 'Untitled Novel';
+  const markdown = createActMarkdown({ actLabel: act.label, title });
 
   await mkdir(actsDir, { recursive: true });
   await writeFile(act.path, markdown, { encoding: 'utf8', flag: 'wx' });
@@ -143,6 +144,12 @@ app.delete('/api/codex/:category/:id', async (request, response) => {
   response.json({ codex: await listCodexEntries(codexDir) });
 });
 
+app.use('/api', (error, _request, response, _next) => {
+  const readable = toReadableError(error);
+  console.error(`[server] ${readable.log}`);
+  response.status(readable.status).json({ error: readable.message, detail: readable.detail });
+});
+
 if (existsSync(distDir)) {
   app.use(express.static(distDir));
   app.use((_request, response) => {
@@ -167,6 +174,24 @@ function withStats(novel) {
     ...novel,
     chapters,
     wordCount: chapters.reduce((total, chapter) => total + chapter.wordCount, 0)
+  };
+}
+
+function toReadableError(error) {
+  if (error?.code === 'ENOENT') {
+    return {
+      status: 404,
+      message: 'Required local data folder or file was not found.',
+      detail: 'Create a new novel or codex entry from the app to generate the missing datasource files.',
+      log: `Missing local data path: ${error.path ?? 'unknown path'}`
+    };
+  }
+
+  return {
+    status: 500,
+    message: 'The local editor server hit an unexpected error.',
+    detail: error?.message ?? 'Unknown error',
+    log: error?.stack ?? String(error)
   };
 }
 
@@ -226,8 +251,8 @@ function publicAct(act) {
   };
 }
 
-function createActMarkdown(label) {
-  return [`## Isekai Project F`, '', `### Chapter 1: ${label} Opening`, '', '#### Scene 1', '', 'New act text...', ''].join('\n');
+function createActMarkdown({ actLabel, title }) {
+  return [`## ${title}`, '', `### Chapter 1: ${actLabel} Opening`, '', '#### Scene 1', '', 'Start writing here...', ''].join('\n');
 }
 
 async function writeCompiledCodex() {

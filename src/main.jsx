@@ -9,11 +9,33 @@ import Text from '@tiptap/extension-text';
 import { Plugin, PluginKey } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
 import { BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
+import {
+  compileCodex as compileLocalCodex,
+  createAct as createLocalAct,
+  createCodexEntry as createLocalCodexEntry,
+  createStarterNovel,
+  deleteCodexEntry as deleteLocalCodexEntry,
+  ensureCodexFolders,
+  flattenCodexEntries,
+  hasHandlePermission,
+  listActs as listLocalActs,
+  listCodexEntries as listLocalCodexEntries,
+  loadRecentDatasourceHandle,
+  openDatasourceFolder,
+  readAct,
+  readCodexEntry,
+  saveRecentDatasourceHandle,
+  supportsLocalFiles,
+  verifyHandlePermission,
+  writeAct,
+  writeCodexEntry as writeLocalCodexEntry
+} from './localDatasource.js';
 import '@fontsource/geist/400.css';
 import './styles.css';
 
 const DRAFT_PREFIX = 'novel-reader-editor:draft:';
 const CODEX_DRAFT_PREFIX = 'novel-reader-editor:codex-draft:';
+const UI_STATE_KEY = 'novel-reader-editor:ui-state';
 const codexCategories = [
   { id: 'characters', label: 'Characters', type: 'character' },
   { id: 'locations', label: 'Locations', type: 'location' },
@@ -21,17 +43,21 @@ const codexCategories = [
 ];
 
 function App() {
-  const [activeMenu, setActiveMenu] = useState('novel');
+  const savedUiState = useMemo(() => readUiState(), []);
+  const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu ?? 'novel');
+  const [datasourceHandle, setDatasourceHandle] = useState(null);
+  const [recentDatasourceHandle, setRecentDatasourceHandle] = useState(null);
   const [acts, setActs] = useState([]);
-  const [selectedActId, setSelectedActId] = useState('act1');
+  const [actsLoaded, setActsLoaded] = useState(false);
+  const [selectedActId, setSelectedActId] = useState(savedUiState.selectedActId ?? 'act1');
   const [novel, setNovel] = useState(null);
-  const [selectedChapter, setSelectedChapter] = useState(0);
-  const [status, setStatus] = useState('Loading act1.md...');
+  const [selectedChapter, setSelectedChapter] = useState(savedUiState.selectedChapter ?? 0);
+  const [status, setStatus] = useState(supportsLocalFiles() ? 'Open or create a local datasource folder' : 'Local folder editing is not supported in this browser');
   const [dirty, setDirty] = useState(false);
   const selectedChapterRef = useRef(null);
   const [codex, setCodex] = useState(null);
-  const [codexCategory, setCodexCategory] = useState('characters');
-  const [selectedCodexId, setSelectedCodexId] = useState(null);
+  const [codexCategory, setCodexCategory] = useState(savedUiState.codexCategory ?? 'characters');
+  const [selectedCodexId, setSelectedCodexId] = useState(savedUiState.selectedCodexId ?? null);
   const [codexEntry, setCodexEntry] = useState(null);
   const [codexStatus, setCodexStatus] = useState('Codex not loaded');
   const [codexDirty, setCodexDirty] = useState(false);
@@ -62,61 +88,82 @@ function App() {
   }, []);
   const hoverHideTimerRef = useRef(null);
 
-  const loadActs = () => {
-    return fetch('/api/acts')
-      .then((response) => {
-        if (!response.ok) throw new Error('Load acts failed');
-        return response.json();
-      })
-      .then((data) => {
-        setActs(data.acts ?? []);
-        if (data.acts?.length && !data.acts.some((act) => act.id === selectedActId)) {
-          setSelectedActId(data.acts[0].id);
-        }
-      })
-      .catch((error) => setStatus(`Failed to load acts: ${error.message}`));
-  };
+  useEffect(() => {
+    if (!supportsLocalFiles()) return;
+    let cancelled = false;
 
-  const loadNovel = (nextStatus, useLocalDraft = true, actId = selectedActId) => {
-    const actFilename = `${actId}.md`;
-    setStatus(`Loading ${actFilename}...`);
-    return fetch(`/api/acts/${actId}`)
-      .then((response) => {
-        if (!response.ok) throw new Error('Load act failed');
-        return response.json();
-      })
-      .then((data) => {
-        const draft = useLocalDraft ? readLocalDraft(novelDraftKey(actId)) : null;
-        if (draft?.novel) {
-          setNovel(draft.novel);
-          setSelectedChapter(Math.min(draft.selectedChapter ?? 0, Math.max(draft.novel.chapters.length - 1, 0)));
-          setDirty(true);
-          setStatus(`Loaded local draft from ${formatDateTime(draft.savedAt)}`);
+    loadRecentDatasourceHandle()
+      .then(async (handle) => {
+        if (!handle || cancelled) return;
+        setRecentDatasourceHandle(handle);
+        if (!(await hasHandlePermission(handle))) {
+          setStatus('Recent datasource needs permission. Click Restore recent datasource to continue.');
           return;
         }
-
-        setNovel(data.novel);
-        setSelectedChapter((current) => Math.min(current, Math.max(data.novel.chapters.length - 1, 0)));
-        setDirty(false);
-        setStatus(nextStatus ?? `Loaded ${data.act?.filename ?? actFilename}`);
+        await activateDatasource(handle, 'Restored recent datasource');
       })
-      .catch((error) => {
-        setStatus(`Failed to load: ${error.message}`);
-      });
-  };
+      .catch((error) => setStatus(`Could not restore recent datasource: ${error.message}`));
 
-  useEffect(() => {
-    loadActs();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    loadNovel(undefined, true, selectedActId);
-  }, [selectedActId]);
+    writeUiState({ activeMenu, selectedActId, selectedChapter, codexCategory, selectedCodexId });
+  }, [activeMenu, selectedActId, selectedChapter, codexCategory, selectedCodexId]);
+
+  const loadActs = async (handle = datasourceHandle) => {
+    if (!handle) return;
+    try {
+      const nextActs = await listLocalActs(handle);
+      setActs(nextActs);
+      setActsLoaded(true);
+      if (nextActs.length && !nextActs.some((act) => act.id === selectedActId)) setSelectedActId(nextActs[0].id);
+      if (!nextActs.length) {
+        setNovel(null);
+        setDirty(false);
+        setStatus('No novel found in this datasource');
+      }
+    } catch (error) {
+      setActsLoaded(true);
+      setStatus(`Failed to load acts: ${error.message}`);
+    }
+  };
+
+  const loadNovel = async (nextStatus, useLocalDraft = true, actId = selectedActId, handle = datasourceHandle) => {
+    if (!handle) return;
+    const actFilename = `${actId}.md`;
+    setStatus(`Loading ${actFilename}...`);
+    try {
+      const data = await readAct(handle, actId);
+      const draft = useLocalDraft ? readLocalDraft(novelDraftKey(actId)) : null;
+      if (draft?.novel) {
+        setNovel(draft.novel);
+        setSelectedChapter(Math.min(draft.selectedChapter ?? 0, Math.max(draft.novel.chapters.length - 1, 0)));
+        setDirty(true);
+        setStatus(`Loaded local draft from ${formatDateTime(draft.savedAt)}`);
+        return;
+      }
+
+      setNovel(data.novel);
+      setSelectedChapter((current) => Math.min(current, Math.max(data.novel.chapters.length - 1, 0)));
+      setDirty(false);
+      setStatus(nextStatus ?? `Loaded ${data.act?.filename ?? actFilename}`);
+    } catch (error) {
+      setStatus(`Failed to load: ${error.message}`);
+    }
+  };
 
   useEffect(() => {
-    if (codex) return;
+    if (!actsLoaded || !acts.length) return;
+    loadNovel(undefined, true, selectedActId);
+  }, [actsLoaded, acts.length, selectedActId, datasourceHandle]);
+
+  useEffect(() => {
+    if (!datasourceHandle || codex) return;
     loadCodex();
-  }, [codex]);
+  }, [codex, datasourceHandle]);
 
   useEffect(() => {
     if (!novel || !dirty) return;
@@ -126,6 +173,7 @@ function App() {
 
   const selected = novel?.chapters[selectedChapter];
   const selectedAct = acts.find((act) => act.id === selectedActId) ?? { id: selectedActId, label: `Act ${selectedActId.replace('act', '')}`, filename: `${selectedActId}.md` };
+  const selectedCodexCategory = codexCategories.find((category) => category.id === codexCategory) ?? codexCategories[0];
   const chapterCount = novel?.chapters.length ?? 0;
   const codexOptions = useMemo(() => getCodexOptions(codex), [codex]);
   const codexMentionIndex = useMemo(() => buildCodexMentionIndex(codex), [codex]);
@@ -178,22 +226,22 @@ function App() {
   }, [codexEntry, codexDirty]);
 
   const loadCodex = () => {
+    if (!datasourceHandle) return Promise.resolve();
     setCodexStatus('Loading codex...');
-    return fetch('/api/codex')
-      .then((response) => response.json())
+    return listLocalCodexEntries(datasourceHandle)
       .then((data) => {
-        setCodex(data.codex);
+        setCodex(data);
         setCodexStatus('Loaded codex');
       })
       .catch((error) => setCodexStatus(`Failed to load codex: ${error.message}`));
   };
 
   const loadCodexEntry = (category, id, useLocalDraft = true) => {
+    if (!datasourceHandle) return Promise.resolve();
     setCodexStatus('Loading entry...');
-    return fetch(`/api/codex/${category}/${id}`)
-      .then((response) => response.json())
-      .then((data) => {
-        const draft = useLocalDraft ? readLocalDraft(codexDraftKey(data.entry)) : null;
+    return readCodexEntry(datasourceHandle, category, id)
+      .then((entry) => {
+        const draft = useLocalDraft ? readLocalDraft(codexDraftKey(entry)) : null;
         if (draft?.entry) {
           setCodexEntry(draft.entry);
           setCodexDirty(true);
@@ -201,7 +249,7 @@ function App() {
           return;
         }
 
-        setCodexEntry(data.entry);
+        setCodexEntry(entry);
         setCodexDirty(false);
         setCodexStatus('Loaded entry');
       })
@@ -224,16 +272,11 @@ function App() {
   const saveCodexEntry = async () => {
     setCodexStatus('Updating codex entry...');
     try {
-      const response = await fetch(`/api/codex/${codexEntry.category}/${codexEntry.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ entry: codexEntry })
-      });
-      if (!response.ok) throw new Error('Update failed');
-      const data = await response.json();
+      const entry = await writeLocalCodexEntry(datasourceHandle, codexEntry);
+      const nextCodex = await listLocalCodexEntries(datasourceHandle);
       localStorage.removeItem(codexDraftKey(codexEntry));
-      setCodex(data.codex);
-      setCodexEntry(data.entry);
+      setCodex(nextCodex);
+      setCodexEntry(entry);
       setCodexDirty(false);
       setCodexStatus('Updated codex entry');
     } catch (error) {
@@ -253,16 +296,11 @@ function App() {
     if (!name) return;
     setCodexStatus('Creating codex entry...');
     try {
-      const response = await fetch(`/api/codex/${codexCategory}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name })
-      });
-      if (!response.ok) throw new Error('Create failed');
-      const data = await response.json();
-      setCodex(data.codex);
-      setSelectedCodexId(data.entry.id);
-      setCodexEntry(data.entry);
+      const entry = await createLocalCodexEntry(datasourceHandle, codexCategory, name);
+      const nextCodex = await listLocalCodexEntries(datasourceHandle);
+      setCodex(nextCodex);
+      setSelectedCodexId(entry.id);
+      setCodexEntry(entry);
       setCodexDirty(false);
       setCodexStatus('Created codex entry');
     } catch (error) {
@@ -275,11 +313,10 @@ function App() {
     if (!window.confirm(`Delete ${codexEntry.name}? This removes its entry folder.`)) return;
     setCodexStatus('Deleting codex entry...');
     try {
-      const response = await fetch(`/api/codex/${codexEntry.category}/${codexEntry.id}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Delete failed');
-      const data = await response.json();
+      await deleteLocalCodexEntry(datasourceHandle, codexEntry.category, codexEntry.id);
+      const nextCodex = await listLocalCodexEntries(datasourceHandle);
       localStorage.removeItem(codexDraftKey(codexEntry));
-      setCodex(data.codex);
+      setCodex(nextCodex);
       setSelectedCodexId(null);
       setCodexEntry(null);
       setCodexDirty(false);
@@ -308,6 +345,65 @@ function App() {
     window.clearTimeout(hoverHideTimerRef.current);
   };
 
+  const activateDatasource = async (handle, nextStatus = 'Loaded datasource') => {
+    await ensureCodexFolders(handle);
+    await saveRecentDatasourceHandle(handle);
+    const nextActs = await listLocalActs(handle);
+    const nextCodex = await listLocalCodexEntries(handle);
+    const nextActId = nextActs.some((act) => act.id === selectedActId) ? selectedActId : nextActs[0]?.id;
+
+    setDatasourceHandle(handle);
+    setCodex(nextCodex);
+    setActs(nextActs);
+    setActsLoaded(true);
+
+    if (nextActId) {
+      const act = nextActs.find((item) => item.id === nextActId);
+      setSelectedActId(nextActId);
+      await loadNovel(`${nextStatus}: ${act?.filename ?? `${nextActId}.md`}`, true, nextActId, handle);
+    } else {
+      setNovel(null);
+      setDirty(false);
+      setStatus('No novel found in this datasource');
+    }
+  };
+
+  const openDatasource = async () => {
+    setStatus('Opening local datasource...');
+    try {
+      const handle = await openDatasourceFolder();
+      await activateDatasource(handle, 'Loaded datasource');
+    } catch (error) {
+      setStatus(`Open failed: ${error.message}`);
+    }
+  };
+
+  const restoreRecentDatasource = async () => {
+    if (!recentDatasourceHandle) return;
+    setStatus('Restoring recent datasource...');
+    try {
+      if (!(await verifyHandlePermission(recentDatasourceHandle))) {
+        setStatus('Folder permission was not granted.');
+        return;
+      }
+      await activateDatasource(recentDatasourceHandle, 'Restored recent datasource');
+    } catch (error) {
+      setStatus(`Restore failed: ${error.message}`);
+    }
+  };
+
+  const createDatasource = async () => {
+    setStatus('Choose an empty folder or datasource folder...');
+    try {
+      const handle = await openDatasourceFolder();
+      setDatasourceHandle(handle);
+      await saveRecentDatasourceHandle(handle);
+      await createNovel(handle);
+    } catch (error) {
+      setStatus(`Create failed: ${error.message}`);
+    }
+  };
+
   const openCodexEntry = (entry) => {
     setActiveMenu('codex');
     changeCodexCategory(entry.category);
@@ -317,9 +413,7 @@ function App() {
   const compileCodex = async () => {
     setCodexStatus('Compiling codex.md...');
     try {
-      const response = await fetch('/api/codex/compile', { method: 'POST' });
-      if (!response.ok) throw new Error('Compile failed');
-      const data = await response.json();
+      const data = await compileLocalCodex(datasourceHandle);
       setCodexStatus(`Compiled ${data.path} with ${data.count} entries`);
     } catch (error) {
       setCodexStatus(`Compile failed: ${error.message}`);
@@ -329,14 +423,7 @@ function App() {
   const saveNovel = async () => {
     setStatus(`Saving ${selectedAct.filename}...`);
     try {
-      const response = await fetch(`/api/acts/${selectedActId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ novel })
-      });
-
-      if (!response.ok) throw new Error('Save failed');
-      const data = await response.json();
+      const data = await writeAct(datasourceHandle, selectedActId, novel, flattenCodexEntries(codex));
       localStorage.removeItem(novelDraftKey(selectedActId));
       setNovel(data.novel);
       setDirty(false);
@@ -349,15 +436,40 @@ function App() {
   const addAct = async () => {
     setStatus('Creating act...');
     try {
-      const response = await fetch('/api/acts', { method: 'POST' });
-      if (!response.ok) throw new Error('Create failed');
-      const data = await response.json();
-      setActs(data.acts ?? []);
-      setSelectedActId(data.act.id);
+      const act = await createLocalAct(datasourceHandle, novel?.title || 'Untitled Novel');
+      const nextActs = await listLocalActs(datasourceHandle);
+      const data = await readAct(datasourceHandle, act.id);
+      setActs(nextActs);
+      setSelectedActId(act.id);
       setNovel(data.novel);
       setSelectedChapter(0);
       setDirty(false);
-      setStatus(`Created ${data.act.filename}`);
+      setStatus(`Created ${act.filename}`);
+    } catch (error) {
+      setStatus(`Create failed: ${error.message}`);
+    }
+  };
+
+  const createNovel = async (handle = datasourceHandle) => {
+    const title = window.prompt('Novel name:', 'Untitled Novel')?.trim();
+    if (!title) return;
+
+    setStatus('Creating novel...');
+    try {
+      await saveRecentDatasourceHandle(handle);
+      await createStarterNovel(handle, title);
+      await ensureCodexFolders(handle);
+      const nextActs = await listLocalActs(handle);
+      const data = await readAct(handle, 'act1');
+      const nextCodex = await listLocalCodexEntries(handle);
+      setActs(nextActs);
+      setActsLoaded(true);
+      setCodex(nextCodex);
+      setSelectedActId('act1');
+      setNovel(data.novel);
+      setSelectedChapter(0);
+      setDirty(false);
+      setStatus('Created act1.md');
     } catch (error) {
       setStatus(`Create failed: ${error.message}`);
     }
@@ -477,6 +589,14 @@ function App() {
     localStorage.removeItem(novelDraftKey(selectedActId));
     loadNovel('Discarded local draft', false, selectedActId);
   };
+
+  if (!datasourceHandle) {
+    return <WelcomeEmptyState onCreate={createDatasource} onOpen={openDatasource} onRestore={recentDatasourceHandle ? restoreRecentDatasource : null} status={status} supported={supportsLocalFiles()} />;
+  }
+
+  if (!novel && actsLoaded && !acts.length) {
+    return <WelcomeEmptyState onCreate={() => createNovel(datasourceHandle)} status={status} supported={supportsLocalFiles()} />;
+  }
 
   if (!novel) {
     return <main className="loading">{status}</main>;
@@ -599,24 +719,33 @@ function App() {
               )}
             </div>
             <nav className="chapterList" aria-label="Codex entries">
-              {codexVisibleEntries.map((entry) => (
-                <button
-                  className={entry.id === selectedCodexId ? `chapterLink chapterLink${capitalize(entry.type)} active` : `chapterLink chapterLink${capitalize(entry.type)}`}
-                  key={entry.id}
-                  onClick={() => setSelectedCodexId(entry.id)}
-                  ref={entry.id === selectedCodexId ? selectedCodexRef : null}
-                  type="button"
-                >
-                  <span className="chapterLinkMeta">
-                    <span className={`entryType entryType${capitalize(entry.type)}`}>
-                      <CodexTypeIcon type={entry.type} />
-                      <span>{entry.type}</span>
+              {codexVisibleEntries.length ? (
+                codexVisibleEntries.map((entry) => (
+                  <button
+                    className={entry.id === selectedCodexId ? `chapterLink chapterLink${capitalize(entry.type)} active` : `chapterLink chapterLink${capitalize(entry.type)}`}
+                    key={entry.id}
+                    onClick={() => setSelectedCodexId(entry.id)}
+                    ref={entry.id === selectedCodexId ? selectedCodexRef : null}
+                    type="button"
+                  >
+                    <span className="chapterLinkMeta">
+                      <span className={`entryType entryType${capitalize(entry.type)}`}>
+                        <CodexTypeIcon type={entry.type} />
+                        <span>{entry.type}</span>
+                      </span>
+                      <small>{formatNumber(entry.wordCount)} words</small>
                     </span>
-                    <small>{formatNumber(entry.wordCount)} words</small>
-                  </span>
-                  <strong>{entry.name}</strong>
-                </button>
-              ))}
+                    <strong>{entry.name}</strong>
+                  </button>
+                ))
+              ) : (
+                <div className="emptyMenuState">
+                  <p>No {selectedCodexCategory.label.toLowerCase()} entries yet.</p>
+                  <button className="button sidebarAction" onClick={addCodexEntry} type="button">
+                    Create {selectedCodexCategory.type} entry
+                  </button>
+                </div>
+              )}
             </nav>
           </>
         )}
@@ -703,6 +832,7 @@ function App() {
             onChange={updateCodexEntry}
             onDelete={deleteCodexEntry}
             onDiscard={discardCodexChanges}
+            onCreate={addCodexEntry}
             onSave={saveCodexEntry}
           />
         )}
@@ -765,9 +895,23 @@ function SearchableFilter({ label, options, value, onChange }) {
   );
 }
 
-function CodexEditor({ category, options, dirty, entry, status, onChange, onDelete, onDiscard, onSave }) {
+function CodexEditor({ category, options, dirty, entry, status, onChange, onCreate, onDelete, onDiscard, onSave }) {
+  const categoryMeta = codexCategories.find((item) => item.id === category) ?? codexCategories[0];
+
   if (!entry) {
-    return null;
+    return (
+      <section className="codexBlank">
+        <div className={`codexBlankIcon entryType${capitalize(categoryMeta.type)}`}>
+          <CodexTypeIcon type={categoryMeta.type} />
+        </div>
+        <p className="eyebrow">{categoryMeta.label}</p>
+        <h1>No {categoryMeta.label.toLowerCase()} entries yet</h1>
+        <p>Create a {categoryMeta.type} entry to start building this codex category.</p>
+        <button className="button primary" onClick={onCreate} type="button">
+          Create {categoryMeta.type} entry
+        </button>
+      </section>
+    );
   }
 
   return (
@@ -1095,6 +1239,36 @@ function CodexMentionedSection({ entries, onOpen, onHover, onLeave }) {
   );
 }
 
+function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
+  return (
+    <main className="welcomeShell">
+      <section className="welcomeCard">
+        <p className="eyebrow">Novel Reader Editor</p>
+        <h1>Use a local datasource folder</h1>
+        <p>
+          Open an existing local folder or create a new one. Manuscript and codex markdown files stay on your computer and are not uploaded to a server.
+        </p>
+        <div className="welcomeActions">
+          {onRestore && (
+            <button className="button secondary" disabled={!supported} onClick={onRestore} type="button">
+              Restore recent datasource
+            </button>
+          )}
+          {onOpen && (
+            <button className="button secondary" disabled={!supported} onClick={onOpen} type="button">
+              Open local datasource
+            </button>
+          )}
+          <button className="button primary" disabled={!supported} onClick={onCreate} type="button">
+            Create new Novel
+          </button>
+          <span>{status}</span>
+        </div>
+      </section>
+    </main>
+  );
+}
+
 function CodexTypeIcon({ type }) {
   const props = { size: 14, strokeWidth: 2.2, 'aria-hidden': true };
   if (type === 'location') return <MapPin {...props} />;
@@ -1335,6 +1509,23 @@ function formatNumber(value) {
 
 function codexDraftKey(entry) {
   return `${CODEX_DRAFT_PREFIX}${entry.category}:${entry.id}`;
+}
+
+function readUiState() {
+  try {
+    return JSON.parse(localStorage.getItem(UI_STATE_KEY) || '{}');
+  } catch {
+    localStorage.removeItem(UI_STATE_KEY);
+    return {};
+  }
+}
+
+function writeUiState(state) {
+  try {
+    localStorage.setItem(UI_STATE_KEY, JSON.stringify(state));
+  } catch (error) {
+    console.error('Failed to save UI state', error);
+  }
 }
 
 function novelDraftKey(actId) {

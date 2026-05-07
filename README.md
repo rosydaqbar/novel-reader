@@ -1,6 +1,6 @@
 # Novel Reader Editor
 
-A local web editor for managing a novel manuscript and its codex. The app runs on your machine, reads markdown files from `datasource/`, and provides a browser UI for editing chapters, scenes, and worldbuilding entries.
+A browser-based editor for managing a novel manuscript and its codex. The app can be deployed publicly while manuscript data stays in a folder selected by each user on their own computer.
 
 ## What It Does
 
@@ -9,19 +9,36 @@ A local web editor for managing a novel manuscript and its codex. The app runs o
 - Detects codex mentions inside novel chapters.
 - Shows mentioned codex entries in the chapter view.
 - Compiles individual codex entries into one `codex.md` file.
-- Saves drafts locally in the browser before writing back to disk.
+- Saves drafts locally in the browser before writing back to the selected folder.
+
+## Local Folder Workflow
+
+The app uses the browser File System Access API.
+
+- User opens the public website.
+- User chooses `Open local datasource` or `Create new Novel`.
+- Browser asks for permission to access a local folder.
+- Markdown files are read and written directly in that folder.
+- No manuscript or codex data is uploaded to the app host.
+
+Best-supported browsers:
+
+- Chrome
+- Edge
+- Brave
+
+Firefox and Safari do not currently support the full local folder write workflow.
 
 ## Novel
 
 Novel content is organized by act.
 
-Expected local structure:
+Expected selected folder structure:
 
 ```txt
-datasource/
-  acts/
-    act1.md
-    act2.md
+acts/
+  act1.md
+  act2.md
 ```
 
 Each act file contains chapters and scenes. The editor parses markdown headings into editable sections.
@@ -52,14 +69,13 @@ Novel features:
 
 Codex content is organized by category.
 
-Expected local structure:
+Expected selected folder structure:
 
 ```txt
-datasource/
-  codex/
-    characters/
-    locations/
-    lore/
+codex/
+  characters/
+  locations/
+  lore/
 ```
 
 Codex categories:
@@ -75,13 +91,13 @@ Codex features:
 - Search and filter by tags or aliases.
 - Highlight mentions in novel text.
 - Show hover cards for matched codex terms.
-- Compile all entries into `datasource/codex.md`.
+- Compile all entries into `codex.md` in the selected folder.
 
 ## Local Data
 
-The `datasource/` folder contains private manuscript and codex data. It is intentionally ignored by Git.
+The local datasource folder contains private manuscript and codex data. It is intentionally ignored by Git.
 
-Use your own local files under `datasource/` when running the editor.
+Use your own local folder when running the editor. In public deployments, each user selects their own folder and maintains their own markdown files.
 
 ## Development
 
@@ -111,7 +127,7 @@ npm run preview
 
 ## Notes
 
-- The server runs on `127.0.0.1:3001` by default.
-- The Vite client runs separately during development.
+- The server runs on `127.0.0.1:3001` by default during local development.
+- Public deployment can serve the built frontend as a static site.
 - Browser local storage is used for unsaved drafts.
-- `datasource/codex.md` is generated output, not the primary codex source.
+- `codex.md` is generated output, not the primary codex source.

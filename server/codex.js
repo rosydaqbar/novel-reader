@@ -13,7 +13,7 @@ export async function listCodexEntries(codexDir) {
   const groups = await Promise.all(
     categories.map(async (category) => {
       const categoryDir = path.join(codexDir, category);
-      const directories = await readdir(categoryDir, { withFileTypes: true });
+      const directories = await readDirectoryOrEmpty(categoryDir);
       const entries = await Promise.all(
         directories
           .filter((directory) => directory.isDirectory())
@@ -146,6 +146,15 @@ export async function deleteCodexEntry(codexDir, category, id) {
   assertValidCategory(category);
   assertSafeId(id);
   await rm(path.join(codexDir, category, id), { recursive: true, force: true });
+}
+
+async function readDirectoryOrEmpty(directoryPath) {
+  try {
+    return await readdir(directoryPath, { withFileTypes: true });
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
 }
 
 export function parseCodexEntry(markdown) {
