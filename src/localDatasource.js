@@ -56,6 +56,7 @@ export async function ensureCodexFolders(rootHandle) {
 export async function listVolumes(rootHandle) {
   const volumesDir = await getDirectoryOrNull(rootHandle, 'volumes');
   const legacyActsDir = await getDirectoryOrNull(rootHandle, 'acts');
+  const rootNovelHandle = await getFileOrNull(rootHandle, 'novel.md');
   const volumes = [];
   const seen = new Set();
 
@@ -75,6 +76,8 @@ export async function listVolumes(rootHandle) {
     const number = Number(match[1]);
     if (!seen.has(number)) volumes.push(legacyActMeta(number));
   }
+
+  if (!volumes.length && rootNovelHandle) volumes.push(rootNovelMeta());
 
   return volumes.sort((a, b) => a.number - b.number);
 }
@@ -99,14 +102,26 @@ export async function readVolume(rootHandle, volumeId) {
   const legacyHandle = legacyActsDir ? await getFileOrNull(legacyActsDir, `act${volume.number}.md`) : null;
   if (legacyHandle) return { volume: legacyActMeta(volume.number), novel: withStats(parseNovel(await readTextFile(legacyHandle))) };
 
+  const rootNovelHandle = volume.id === 'volume1' ? await getFileOrNull(rootHandle, 'novel.md') : null;
+  if (rootNovelHandle) return { volume: rootNovelMeta(), novel: withStats(parseNovel(await readTextFile(rootNovelHandle))) };
+
   throw new Error(`${volume.filename} was not found.`);
 }
 
 export async function writeVolume(rootHandle, volumeId, novel, codexEntries) {
   const volume = getVolumeFromId(volumeId);
-  const volumesDir = await rootHandle.getDirectoryHandle('volumes', { create: true });
-  const volumeHandle = await volumesDir.getFileHandle(volume.filename, { create: true });
   const markdown = serializeNovel(novel, { codexEntries });
+
+  const volumesDir = await getDirectoryOrNull(rootHandle, 'volumes');
+  const existingVolumeHandle = volumesDir ? await getFileOrNull(volumesDir, volume.filename) : null;
+  const rootNovelHandle = volume.id === 'volume1' && !existingVolumeHandle ? await getFileOrNull(rootHandle, 'novel.md') : null;
+  if (rootNovelHandle) {
+    await writeTextFile(rootNovelHandle, markdown);
+    return { volume: rootNovelMeta(), novel: withStats(parseNovel(markdown)) };
+  }
+
+  const nextVolumesDir = volumesDir ?? await rootHandle.getDirectoryHandle('volumes', { create: true });
+  const volumeHandle = await nextVolumesDir.getFileHandle(volume.filename, { create: true });
   await writeTextFile(volumeHandle, markdown);
   return { volume, novel: withStats(parseNovel(markdown)) };
 }
@@ -179,6 +194,31 @@ export async function listCodexEntries(rootHandle) {
     })
   );
   return Object.fromEntries(groups);
+}
+
+export async function recoverCodexFromCompiledFile(rootHandle) {
+  const codexHandle = await getFileOrNull(rootHandle, 'codex.md');
+  if (!codexHandle) return { count: 0, skipped: 0, codex: await listCodexEntries(rootHandle) };
+
+  const entries = parseCompiledCodex(await readTextFile(codexHandle));
+  let count = 0;
+  let skipped = 0;
+
+  for (const entry of entries) {
+    const codexDir = await rootHandle.getDirectoryHandle('codex', { create: true });
+    const categoryDir = await codexDir.getDirectoryHandle(entry.category, { create: true });
+    const existingDir = await getDirectoryOrNull(categoryDir, entry.id);
+    const existingFile = existingDir ? await getFileOrNull(existingDir, 'entry.md') : null;
+    if (existingFile) {
+      skipped += 1;
+      continue;
+    }
+
+    await writeCodexEntry(rootHandle, entry);
+    count += 1;
+  }
+
+  return { count, skipped, codex: await listCodexEntries(rootHandle) };
 }
 
 export async function readCodexEntry(rootHandle, category, id) {
@@ -339,6 +379,10 @@ function volumeMeta(number) {
   return { id: `volume${number}`, number, label: `Volume ${number}`, filename: `volume${number}.md`, path: `volumes/volume${number}.md` };
 }
 
+function rootNovelMeta() {
+  return { id: 'volume1', number: 1, label: 'Volume 1', filename: 'novel.md', path: 'novel.md', rootNovel: true };
+}
+
 function legacyActMeta(number) {
   return { id: `volume${number}`, number, label: `Volume ${number}`, filename: `act${number}.md`, path: `acts/act${number}.md`, legacy: true };
 }
@@ -496,6 +540,135 @@ function parseCodexEntry(markdown) {
   const match = normalized.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
   if (!match) return { meta: {}, body: normalized.trim() };
   return { meta: parseFrontmatter(match[1]), body: match[2].trim() };
+}
+
+function parseCompiledCodex(markdown) {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n');
+  const entries = [];
+  let currentCategory = null;
+  let currentEntry = null;
+
+  const flushEntry = () => {
+    if (!currentEntry) return;
+    const source = parseSourcePath(currentEntry.meta.source);
+    const category = source?.category ?? currentEntry.category;
+    const type = currentEntry.meta.type || typeByCategory[category];
+    const id = source?.id ?? slugify(currentEntry.name);
+
+    if (codexCategories.includes(category) && id) {
+      entries.push({
+        id,
+        category,
+        type,
+        name: currentEntry.name,
+        color: null,
+        aliases: currentEntry.meta.aliases ?? [],
+        tags: currentEntry.meta.tags ?? [],
+        alwaysIncludeInContext: Boolean(currentEntry.meta.alwaysIncludeInContext),
+        doNotTrack: Boolean(currentEntry.meta.doNotTrack),
+        noAutoInclude: Boolean(currentEntry.meta.noAutoInclude),
+        fields: {},
+        body: currentEntry.bodyLines.join('\n').trim() || 'No details yet.'
+      });
+    }
+
+    currentEntry = null;
+  };
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const categoryMatch = line.match(/^##\s+(.+)\s*$/);
+    if (categoryMatch && !line.startsWith('###')) {
+      flushEntry();
+      currentCategory = normalizeCompiledCategory(categoryMatch[1]);
+      continue;
+    }
+
+    const entryMatch = line.match(/^###\s+(.+)\s*$/);
+    if (currentCategory && entryMatch && hasCompiledEntryMetadataAhead(lines, index + 1)) {
+      flushEntry();
+      currentEntry = {
+        category: currentCategory,
+        name: entryMatch[1].trim(),
+        meta: {},
+        metadataComplete: false,
+        bodyLines: []
+      };
+      continue;
+    }
+
+    if (!currentEntry) continue;
+
+    if (!currentEntry.metadataComplete) {
+      const metadata = parseCompiledMetadataLine(line);
+      if (metadata) {
+        Object.assign(currentEntry.meta, metadata);
+        continue;
+      }
+      if (!line.trim()) continue;
+      currentEntry.metadataComplete = true;
+    }
+
+    currentEntry.bodyLines.push(line);
+  }
+
+  flushEntry();
+  return entries;
+}
+
+function hasCompiledEntryMetadataAhead(lines, from) {
+  for (let index = from; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) continue;
+    return Boolean(parseCompiledMetadataLine(line));
+  }
+  return false;
+}
+
+function parseCompiledMetadataLine(line) {
+  const bold = line.match(/^\*\*([^*]+):\*\*\s*(.*)$/);
+  const bullet = line.match(/^-\s*([^:]+):\s*(.*)$/);
+  const match = bold ?? bullet;
+  if (!match) return null;
+
+  const key = match[1].trim().toLowerCase();
+  const value = match[2].trim().replace(/^`|`$/g, '');
+
+  if (key === 'type') return { type: value };
+  if (key === 'source') return { source: value };
+  if (key === 'aliases') return { aliases: parseCompiledList(value) };
+  if (key === 'tags') return { tags: parseCompiledList(value) };
+  if (key === 'context') return parseCompiledContext(value);
+  return null;
+}
+
+function parseCompiledContext(value) {
+  const context = {};
+  const pattern = /([A-Za-z0-9_]+)=([^,\s]+)/g;
+  let match = pattern.exec(value);
+  while (match) {
+    context[match[1]] = match[2] === 'true';
+    match = pattern.exec(value);
+  }
+  return context;
+}
+
+function parseCompiledList(value) {
+  if (!value || value === 'None') return [];
+  return value.split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function parseSourcePath(source) {
+  const match = String(source ?? '').match(/(?:^|`)?(characters|locations|lore)\/([^/`]+)\/entry\.md/);
+  return match ? { category: match[1], id: match[2] } : null;
+}
+
+function normalizeCompiledCategory(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized.startsWith('character')) return 'characters';
+  if (normalized.startsWith('location')) return 'locations';
+  if (normalized.startsWith('lore')) return 'lore';
+  return null;
 }
 
 function serializeCodexEntry(entry) {

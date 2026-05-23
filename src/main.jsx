@@ -26,6 +26,7 @@ import {
   openDatasourceFolder,
   readVolume,
   readCodexEntry,
+  recoverCodexFromCompiledFile,
   saveRecentDatasourceHandle,
   supportsLocalFiles,
   verifyHandlePermission,
@@ -315,15 +316,24 @@ function App() {
     setCodexStatus('Saved locally');
   }, [codexEntry, codexDirty]);
 
-  const loadCodex = () => {
-    if (!datasourceHandle) return Promise.resolve();
+  const loadCodexWithRecovery = async (handle) => {
+    const data = await listLocalCodexEntries(handle);
+    if (flattenCodexEntries(data).length) return { codex: data, recovered: 0 };
+
+    const recovery = await recoverCodexFromCompiledFile(handle);
+    return { codex: recovery.codex, recovered: recovery.count };
+  };
+
+  const loadCodex = async () => {
+    if (!datasourceHandle) return;
     setCodexStatus('Loading codex...');
-    return listLocalCodexEntries(datasourceHandle)
-      .then((data) => {
-        setCodex(data);
-        setCodexStatus('Loaded codex');
-      })
-      .catch((error) => setCodexStatus(`Failed to load codex: ${error.message}`));
+    try {
+      const data = await loadCodexWithRecovery(datasourceHandle);
+      setCodex(data.codex);
+      setCodexStatus(data.recovered > 0 ? `Recovered ${data.recovered} codex entries from codex.md` : 'Loaded codex');
+    } catch (error) {
+      setCodexStatus(`Failed to load codex: ${error.message}`);
+    }
   };
 
   const loadCodexEntry = (category, id, useLocalDraft = true) => {
@@ -440,11 +450,12 @@ function App() {
     await ensureCodexFolders(handle);
     await saveRecentDatasourceHandle(handle);
     const nextVolumes = await listLocalVolumes(handle);
-    const nextCodex = await listLocalCodexEntries(handle);
+    const codexLoad = await loadCodexWithRecovery(handle);
     const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id;
 
     setDatasourceHandle(handle);
-    setCodex(nextCodex);
+    setCodex(codexLoad.codex);
+    setCodexStatus(codexLoad.recovered > 0 ? `Recovered ${codexLoad.recovered} codex entries from codex.md` : 'Loaded codex');
     setVolumes(nextVolumes);
     setVolumesLoaded(true);
 
