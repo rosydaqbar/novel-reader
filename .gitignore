@@ -1,6 +1,9 @@
 node_modules/
 dist/
 datasource/
+.agents/
+.opencode/skills/
+skills-lock.json
 
 .env
 .env.*
