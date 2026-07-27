@@ -1918,6 +1918,7 @@ function getCodexEntryMentionEntries(entry, mentionIndex) {
   const text = entry.body || '';
   for (const match of findMentionMatches(text, mentionIndex)) {
     for (const item of match.mention.matches) {
+      if (item.entry.category === entry.category && item.entry.id === entry.id) continue;
       byKey.set(`${item.entry.category}:${item.entry.id}`, item.entry);
     }
   }
