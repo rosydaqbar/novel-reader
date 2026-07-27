@@ -343,7 +343,7 @@ function createVolumeMarkdown({ volumeLabel, title }) {
 }
 
 async function writeCompiledCodex() {
-  const result = await compileCodex(codexDir);
+  const result = await compileCodex(codexDir, datasourceDir);
   await writeFile(path.join(datasourceDir, 'codex.md'), result.markdown, 'utf8');
   return { count: result.count, path: 'datasource/codex.md' };
 }

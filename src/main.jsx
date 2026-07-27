@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Extension } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
@@ -155,6 +155,8 @@ function App() {
   const [codexTagFilter, setCodexTagFilter] = useState('');
   const [codexAliasFilter, setCodexAliasFilter] = useState('');
   const [hoveredMention, setHoveredMention] = useState(null);
+  const [chapterMentionDetail, setChapterMentionDetail] = useState(null);
+  const [pendingParagraphAnchor, setPendingParagraphAnchor] = useState(null);
   const selectedCodexRef = useRef(null);
 
   useEffect(() => {
@@ -202,6 +204,53 @@ function App() {
   useEffect(() => {
     writeUiState({ activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId });
   }, [activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId]);
+
+  useEffect(() => {
+    setChapterMentionDetail(null);
+  }, [activeMenu, selectedCodexId, selectedVolumeId]);
+
+  useEffect(() => {
+    if (activeMenu !== 'novel' || !pendingParagraphAnchor) return;
+    let frameId;
+    let highlightTimer;
+    let attempts = 0;
+    let anchoredParagraph;
+
+    const findParagraph = () => {
+      const sceneCards = [...document.querySelectorAll('.sceneCard[data-scene-index]')];
+      const sceneCard = sceneCards.find((node) => {
+        if (pendingParagraphAnchor.sceneId) return node.dataset.sceneId === pendingParagraphAnchor.sceneId;
+        return Number(node.dataset.sceneIndex) === pendingParagraphAnchor.sceneIndex;
+      });
+      const paragraph = sceneCard?.querySelectorAll('.tiptapEditor > p')[pendingParagraphAnchor.paragraphIndex];
+
+      if (!paragraph && attempts < 30) {
+        attempts += 1;
+        frameId = window.requestAnimationFrame(findParagraph);
+        return;
+      }
+
+      if (!paragraph) {
+        setPendingParagraphAnchor(null);
+        return;
+      }
+
+      paragraph.classList.add('paragraphAnchorTarget');
+      anchoredParagraph = paragraph;
+      paragraph.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      highlightTimer = window.setTimeout(() => {
+        paragraph.classList.remove('paragraphAnchorTarget');
+        setPendingParagraphAnchor(null);
+      }, 1800);
+    };
+
+    frameId = window.requestAnimationFrame(findParagraph);
+    return () => {
+      window.cancelAnimationFrame(frameId);
+      window.clearTimeout(highlightTimer);
+      anchoredParagraph?.classList.remove('paragraphAnchorTarget');
+    };
+  }, [activeMenu, pendingParagraphAnchor, selectedChapter]);
 
   const loadVolumes = async (handle = datasourceHandle) => {
     if (!handle) return;
@@ -510,6 +559,33 @@ function App() {
     setActiveMenu('codex');
     changeCodexCategory(entry.category);
     setSelectedCodexId(entry.id);
+  };
+
+  const hoverChapterEntry = (chapter, rect) => {
+    setHoveredMention({
+      mention: {
+        term: `Chapter ${chapter.chapterNumber}`,
+        matches: [{ matchType: 'chapter', matchedAlias: null, chapter }]
+      },
+      ...getClampedHoverPosition(rect)
+    });
+  };
+
+  const openChapterMentionDetail = (entry, chapter) => {
+    const paragraphs = getEntryChapterMentionParagraphs(entry, chapter);
+    setChapterMentionDetail({ chapterId: chapter.id, chapterNumber: chapter.chapterNumber, title: chapter.title, paragraphs });
+  };
+
+  const goToChapterParagraph = (target) => {
+    const chapterIndex = novel.chapters.findIndex((chapter) => {
+      if (target.chapterId) return chapter.id === target.chapterId;
+      return chapter.chapterNumber === target.chapterNumber;
+    });
+    if (chapterIndex < 0) return;
+    setHoveredMention(null);
+    setPendingParagraphAnchor(target);
+    setSelectedChapter(chapterIndex);
+    setActiveMenu('novel');
   };
 
   const compileCodex = async () => {
@@ -968,10 +1044,11 @@ function App() {
               />
             </div>
 
-            {selected.scenes.map((scene) => (
+            {selected.scenes.map((scene, sceneIndex) => (
               <SceneEditor
                 key={scene.id}
                 scene={scene}
+                sceneIndex={sceneIndex}
                 mentionIndex={codexMentionIndex}
                 onChange={(patch) => updateScene(selected.id, scene.id, patch)}
                 onDelete={() => deleteScene(selected.id, scene.id)}
@@ -987,18 +1064,32 @@ function App() {
             )}
           </>
         ) : (
-          <CodexEditor
-            category={codexCategory}
-            options={codexOptions}
-            dirty={codexDirty}
-            entry={codexEntry}
-            status={codexStatus}
-            onChange={updateCodexEntry}
-            onDelete={deleteCodexEntry}
-            onDiscard={discardCodexChanges}
-            onCreate={addCodexEntry}
-            onSave={saveCodexEntry}
-          />
+          <div className={chapterMentionDetail ? 'codexWorkspaceLayout hasChapterMentionDetail' : 'codexWorkspaceLayout'}>
+            <div className="codexWorkspaceMain">
+              <CodexEditor
+                category={codexCategory}
+                options={codexOptions}
+                dirty={codexDirty}
+                entry={codexEntry}
+                status={codexStatus}
+                novel={novel}
+                mentionIndex={codexMentionIndex}
+                chapterMentionDetail={chapterMentionDetail}
+                onChapterHover={hoverChapterEntry}
+                onChapterDetailOpen={(chapter) => openChapterMentionDetail(codexEntry, chapter)}
+                onChapterDetailClose={() => setChapterMentionDetail(null)}
+                onChapterParagraphOpen={goToChapterParagraph}
+                onMentionHover={showMentionHover}
+                onEntryOpen={openCodexEntry}
+                onMentionLeave={hideMentionHover}
+                onChange={updateCodexEntry}
+                onDelete={deleteCodexEntry}
+                onDiscard={discardCodexChanges}
+                onCreate={addCodexEntry}
+                onSave={saveCodexEntry}
+              />
+            </div>
+          </div>
         )}
         {hoveredMention && <CodexMentionHoverCard data={hoveredMention} onMouseEnter={keepMentionHover} onMouseLeave={hideMentionHover} />}
       </section>
@@ -1059,8 +1150,33 @@ function SearchableFilter({ label, options, value, onChange }) {
   );
 }
 
-function CodexEditor({ category, options, dirty, entry, status, onChange, onCreate, onDelete, onDiscard, onSave }) {
+function CodexEditor({ category, options, dirty, entry, status, novel, mentionIndex, chapterMentionDetail, onChapterHover, onChapterDetailOpen, onChapterDetailClose, onChapterParagraphOpen, onMentionHover, onEntryOpen, onMentionLeave, onChange, onCreate, onDelete, onDiscard, onSave }) {
   const categoryMeta = codexCategories.find((item) => item.id === category) ?? codexCategories[0];
+  const entryChapterMentions = useMemo(() => getEntryChapterMentions(entry, novel), [entry, novel]);
+  const entryMentionedEntries = useMemo(() => getCodexEntryMentionEntries(entry, mentionIndex), [entry, mentionIndex]);
+  const editorPanelRef = useRef(null);
+  const chapterMentionAnchorRef = useRef(null);
+  const [chapterMentionMaxHeight, setChapterMentionMaxHeight] = useState(null);
+
+  useLayoutEffect(() => {
+    if (!chapterMentionDetail || !editorPanelRef.current || !chapterMentionAnchorRef.current) return;
+
+    const updateMaxHeight = () => {
+      const editorRect = editorPanelRef.current.getBoundingClientRect();
+      const anchorRect = chapterMentionAnchorRef.current.getBoundingClientRect();
+      setChapterMentionMaxHeight(Math.max(120, Math.floor(editorRect.bottom - anchorRect.top)));
+    };
+
+    updateMaxHeight();
+    const observer = new ResizeObserver(updateMaxHeight);
+    observer.observe(editorPanelRef.current);
+    observer.observe(chapterMentionAnchorRef.current);
+    window.addEventListener('resize', updateMaxHeight);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('resize', updateMaxHeight);
+    };
+  }, [chapterMentionDetail, entry?.id]);
 
   if (!entry) {
     return (
@@ -1096,7 +1212,7 @@ function CodexEditor({ category, options, dirty, entry, status, onChange, onCrea
         </div>
       </header>
 
-      <article className="chapterPanel">
+      <article className="chapterPanel" ref={editorPanelRef}>
         <div className="chapterHero codexHero">
           <div className="codexEditorGrid">
             <label>
@@ -1144,9 +1260,32 @@ function CodexEditor({ category, options, dirty, entry, status, onChange, onCrea
               <Trash2 size={14} strokeWidth={2.2} aria-hidden="true" />
             </button>
           </div>
+          <CodexMentionedSection
+            entries={entryMentionedEntries}
+            onOpen={onEntryOpen}
+            onHover={() => {}}
+            onLeave={() => {}}
+          />
+          <div className="chapterMentionAnchor" ref={chapterMentionAnchorRef}>
+            <ChapterMentionedSection
+              chapters={entryChapterMentions}
+              onHover={(chapter, rect) => { onChapterHover(chapter, rect); }}
+              onLeave={onMentionLeave}
+              onOpen={onChapterDetailOpen}
+            />
+            {chapterMentionDetail && (
+              <ChapterMentionDetail
+                key={chapterMentionDetail.chapterId ?? chapterMentionDetail.chapterNumber}
+                data={chapterMentionDetail}
+                maxHeight={chapterMentionMaxHeight}
+                onClose={onChapterDetailClose}
+                onParagraphOpen={onChapterParagraphOpen}
+              />
+            )}
+          </div>
         </div>
 
-        <CodexBodyEditor body={entry.body} entryId={entry.id} onChange={(body) => onChange({ body })} />
+        <CodexBodyEditor body={entry.body} entryId={entry.id} mentionIndex={mentionIndex} onChange={(body) => onChange({ body })} onMentionHover={onMentionHover} onMentionLeave={onMentionLeave} />
       </article>
     </>
   );
@@ -1234,19 +1373,34 @@ function MultiValuePicker({ label, options, values, onChange }) {
   );
 }
 
-function CodexBodyEditor({ body, entryId, onChange }) {
+function CodexBodyEditor({ body, entryId, mentionIndex, onChange, onMentionHover, onMentionLeave }) {
   const editor = useEditor({
-    extensions: [Document, Paragraph, Text, History],
+    extensions: [Document, Paragraph, Text, History, CodexMentionExtension.configure({ mentionIndex })],
     content: markdownToDoc(body),
     editorProps: {
       attributes: {
         class: 'tiptapEditor codexBodyEditor'
+      },
+      handleDOMEvents: {
+        mouseover(view, event) {
+          const target = event.target.closest?.('.codexMention');
+          if (!target) { if (onMentionLeave) onMentionLeave(); return false; }
+          const key = target.getAttribute('data-codex-key');
+          if (key && onMentionHover) onMentionHover(key, target.getBoundingClientRect());
+          return false;
+        },
+        mouseout(view, event) {
+          const to = event.relatedTarget;
+          if (to && (to.closest?.('.codexMention') || to.classList?.contains?.('codexMention'))) return false;
+          if (onMentionLeave) onMentionLeave();
+          return false;
+        }
       }
     },
     onUpdate({ editor }) {
       onChange(docToMarkdown(editor.getJSON()));
     }
-  });
+  }, [mentionIndex]);
 
   useEffect(() => {
     if (!editor) return;
@@ -1265,7 +1419,7 @@ function CodexBodyEditor({ body, entryId, onChange }) {
   );
 }
 
-function SceneEditor({ scene, mentionIndex, onChange, onDelete, onMentionHover, onMentionLeave }) {
+function SceneEditor({ scene, sceneIndex, mentionIndex, onChange, onDelete, onMentionHover, onMentionLeave }) {
   const [expanded, setExpanded] = useState(true);
   const content = useMemo(() => paragraphsToDoc(scene.paragraphs), [scene.id]);
   const editor = useEditor({
@@ -1287,7 +1441,7 @@ function SceneEditor({ scene, mentionIndex, onChange, onDelete, onMentionHover, 
   }, [editor, scene.id]);
 
   return (
-    <section className="sceneCard">
+    <section className="sceneCard" data-scene-id={scene.id} data-scene-index={sceneIndex}>
       <div className="sceneHeader">
         <div className="sceneTitleGroup">
           <button aria-label={expanded ? 'Hide scene' : 'Show scene'} className="collapseButton" onClick={() => setExpanded((current) => !current)} type="button">
@@ -1333,7 +1487,23 @@ function CodexMentionHoverCard({ data, onMouseEnter, onMouseLeave }) {
         <p>{mention.matches.length} {mention.matches.length === 1 ? 'match' : 'matches'}</p>
       </div>
       <div className="codexHoverEntries">
-        {mention.matches.map((match) => (
+        {mention.matches.map((match) => {
+          if (match.chapter) {
+            return (
+              <section className="codexHoverEntry" key={`ch${match.chapter.chapterNumber}`}>
+                <div className="codexHoverEntryHeader">
+                  <div>
+                    <h3>Chapter {match.chapter.chapterNumber}</h3>
+                    <p className="entryType entryTypeChapter">chapter</p>
+                  </div>
+                </div>
+                <div className="metadataStack">
+                  <span><strong>Title:</strong> {match.chapter.title}</span>
+                </div>
+              </section>
+            );
+          }
+          return (
           <section className="codexHoverEntry" key={`${match.entry.category}:${match.entry.id}:${match.matchType}`}>
             <div className="codexHoverEntryHeader">
               <div>
@@ -1357,7 +1527,8 @@ function CodexMentionHoverCard({ data, onMouseEnter, onMouseLeave }) {
               {match.entry.body || 'No body content.'}
             </div>
           </section>
-        ))}
+        );
+      })}
       </div>
     </aside>
   );
@@ -1402,6 +1573,93 @@ function CodexMentionedSection({ entries, onOpen, onHover, onLeave }) {
       )}
     </section>
   );
+}
+
+function ChapterMentionedSection({ chapters, onHover, onLeave, onOpen }) {
+  return (
+    <section className="chapterCodexMentions">
+      <div className="chapterCodexHeader">
+        <h2>Chapters Mentioned</h2>
+        <span>{chapters.length} {chapters.length === 1 ? 'chapter' : 'chapters'}</span>
+      </div>
+      {chapters.length ? (
+        <div className="chapterMentionChips">
+          {chapters.map((chapter) => (
+            <button
+              className="chapterMentionChip chapterMentionChipChapter"
+              key={chapter.chapterNumber}
+              onClick={() => onOpen?.(chapter)}
+              onMouseEnter={(event) => onHover(chapter, event.currentTarget.getBoundingClientRect())}
+              onMouseLeave={onLeave}
+              type="button"
+            >
+              <span>Chapter {chapter.chapterNumber}</span>
+              <span className="chapterMentionSubtitle">{chapter.title}</span>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <p>No chapters mention this entry.</p>
+      )}
+    </section>
+  );
+}
+
+function ChapterMentionDetail({ data, maxHeight, onClose, onParagraphOpen }) {
+  if (!data) return null;
+  return (
+    <aside
+      className="chapterMentionDetail"
+      style={maxHeight ? { '--chapter-mention-max-height': `${maxHeight}px` } : undefined}
+    >
+      <div className="chapterMentionDetailHeader">
+        <h2>Chapter {data.chapterNumber}</h2>
+        <span className="chapterMentionDetailTitle">{data.title}</span>
+        <button className="button secondary iconButton" onClick={onClose} type="button" aria-label="Close">×</button>
+      </div>
+      <div className="chapterMentionDetailBody">
+        {data.paragraphs.length ? data.paragraphs.map((para, index) => (
+          <div key={`${para.sceneId ?? para.sceneIndex}:${para.paragraphIndex}`}>
+            {index > 0 && <hr className="mentionDivider" />}
+            <button
+              className="mentionParagraphRow"
+              onClick={() => onParagraphOpen({
+                chapterId: data.chapterId,
+                chapterNumber: data.chapterNumber,
+                sceneId: para.sceneId,
+                sceneIndex: para.sceneIndex,
+                paragraphIndex: para.paragraphIndex
+              })}
+              type="button"
+              aria-label="Go to surrounding"
+            >
+              <span className="mentionParagraph">
+                <HighlightText text={para.text} highlights={para.matches} />
+              </span>
+              <span className="mentionParagraphChevron">
+                <ChevronRight size={16} strokeWidth={2.2} aria-hidden="true" />
+                <span className="mentionParagraphTooltip" role="tooltip">Go to surrounding</span>
+              </span>
+            </button>
+          </div>
+        )) : <p className="mentionParagraph">No matching paragraphs found.</p>}
+      </div>
+    </aside>
+  );
+}
+
+function HighlightText({ text, highlights }) {
+  if (!highlights?.length) return text;
+  const parts = [];
+  let last = 0;
+  const sorted = [...highlights].sort((a, b) => a.from - b.from);
+  for (const h of sorted) {
+    if (h.from > last) parts.push(text.slice(last, h.from));
+    parts.push(<mark key={h.from} className="mentionHighlight">{text.slice(h.from, h.to)}</mark>);
+    last = h.to;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return parts;
 }
 
 function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
@@ -1596,6 +1854,74 @@ function findMentionMatches(text, mentionIndex) {
   }
 
   return matches.sort((a, b) => a.from - b.from);
+}
+
+function getEntryChapterMentionParagraphs(entry, chapter) {
+  if (!entry || !chapter?.scenes?.length) return [];
+  const terms = [entry.name, ...(entry.aliases ?? [])].filter(Boolean).map((t) => String(t).trim()).filter((t) => t);
+  if (!terms.length) return [];
+  const index = terms.map((term) => ({
+    key: stableMentionKey(term), term,
+    matches: []
+  })).sort((a, b) => b.term.length - a.term.length || a.term.localeCompare(b.term));
+  const result = [];
+  for (const [sceneIndex, scene] of chapter.scenes.entries()) {
+    for (const [paragraphIndex, raw] of (scene.paragraphs ?? []).entries()) {
+      const text = raw || '';
+      const matches = [];
+      let occupiedRanges = [];
+      for (const mention of index) {
+        let from = 0;
+        while (true) {
+          const pos = text.indexOf(mention.term, from);
+          if (pos === -1) break;
+          const to = pos + mention.term.length;
+          const overlaps = occupiedRanges.some(([oFrom, oTo]) => pos < oTo && to > oFrom);
+          if (!overlaps && hasMentionBoundary(text, pos, to)) {
+            matches.push({ from: pos, to });
+            occupiedRanges.push([pos, to]);
+          }
+          from = pos + 1;
+        }
+      }
+      if (matches.length) result.push({ text, matches, sceneId: scene.id, sceneIndex, paragraphIndex });
+    }
+  }
+  return result;
+}
+
+function getEntryChapterMentions(entry, novel) {
+  if (!entry || !novel?.chapters?.length) return [];
+  const terms = [entry.name, ...(entry.aliases ?? [])].filter(Boolean).map((t) => String(t).trim()).filter((t) => t);
+  if (!terms.length) return [];
+  const index = terms.map((term) => ({
+    key: stableMentionKey(term), term,
+    matches: [{ matchType: 'name', matchedAlias: term === entry.name ? null : term, entry, isEntryTerm: true }]
+  })).sort((a, b) => b.term.length - a.term.length || a.term.localeCompare(b.term));
+  const byKey = new Map();
+  for (const chapter of novel.chapters) {
+    for (const scene of chapter.scenes ?? []) {
+      const text = (scene.paragraphs ?? []).join('\n\n');
+      for (const match of findMentionMatches(text, index)) {
+        byKey.set(chapter.chapterNumber, chapter);
+        break;
+      }
+      if (byKey.has(chapter.chapterNumber)) break;
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.chapterNumber - b.chapterNumber);
+}
+
+function getCodexEntryMentionEntries(entry, mentionIndex) {
+  if (!entry || !mentionIndex?.length) return [];
+  const byKey = new Map();
+  const text = entry.body || '';
+  for (const match of findMentionMatches(text, mentionIndex)) {
+    for (const item of match.mention.matches) {
+      byKey.set(`${item.entry.category}:${item.entry.id}`, item.entry);
+    }
+  }
+  return [...byKey.values()].sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
 }
 
 function getChapterMentionEntries(chapter, mentionIndex) {

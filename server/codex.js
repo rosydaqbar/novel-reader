@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { parseNovel } from './markdown.js';
 
 const categories = ['characters', 'locations', 'lore'];
 const typeByCategory = {
@@ -46,8 +47,9 @@ export async function listCodexEntries(codexDir) {
   return Object.fromEntries(groups);
 }
 
-export async function compileCodex(codexDir) {
+export async function compileCodex(codexDir, datasourceDir) {
   const codex = await listCodexEntries(codexDir);
+  const entries = Object.values(codex).flatMap((items) => items ?? []);
   const sections = [
     '# Codex',
     '',
@@ -56,13 +58,47 @@ export async function compileCodex(codexDir) {
     '> Disclaimer: The `Source` path shown on each entry is a local project reference used by this editor. It most likely will not exist or resolve in other systems that consume this compiled codex.',
     ''
   ];
+
+  const chapters = [];
+  if (datasourceDir) {
+    const volumesDir = path.join(datasourceDir, 'volumes');
+    try {
+      const volumeFiles = await readdir(volumesDir, { withFileTypes: true });
+      for (const file of volumeFiles) {
+        if (file.isFile() && file.name.match(/^volume\d+\.md$/)) {
+          const markdown = await readFile(path.join(volumesDir, file.name), 'utf8');
+          const novel = parseNovel(markdown);
+          for (const chapter of novel.chapters) {
+            chapters.push(chapter);
+          }
+        }
+      }
+    } catch {}
+  }
+
+  function containsTerm(text, term) {
+    let from = text.indexOf(term);
+    while (from !== -1) {
+      const to = from + term.length;
+      if (hasMentionBoundary(text, from, to)) return true;
+      from = text.indexOf(term, from + 1);
+    }
+    return false;
+  }
+
+  function hasMentionBoundary(text, from, to) {
+    const charBefore = from <= 0 ? ' ' : text[from - 1];
+    const charAfter = to >= text.length ? ' ' : text[to];
+    return !(/[\p{L}\p{N}]/u.test(charBefore)) && !(/[\p{L}\p{N}]/u.test(charAfter));
+  }
+
   let count = 0;
 
   for (const category of categories) {
-    const entries = codex[category] ?? [];
+    const categoryEntries = codex[category] ?? [];
     sections.push(`## ${titleCase(category)}`, '');
 
-    for (const entry of entries) {
+    for (const entry of categoryEntries) {
       count += 1;
       sections.push(
         `### ${entry.name}`,
@@ -72,10 +108,44 @@ export async function compileCodex(codexDir) {
         `**Aliases:** ${formatList(entry.aliases)}`,
         `**Tags:** ${formatList(entry.tags)}`,
         `**Context:** alwaysIncludeInContext=${entry.alwaysIncludeInContext}, doNotTrack=${entry.doNotTrack}, noAutoInclude=${entry.noAutoInclude}`,
-        '',
-        entry.body.trim() || '_No body content._',
         ''
       );
+
+      const bodyText = entry.body || '';
+      const mentionedInBody = [];
+      for (const other of entries) {
+        if (other.id === entry.id && other.category === entry.category) continue;
+        const terms = [other.name, ...(other.aliases ?? [])].map((t) => String(t ?? '').trim()).filter(Boolean);
+        if (terms.some((term) => containsTerm(bodyText, term))) mentionedInBody.push(other);
+      }
+      mentionedInBody.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+      if (mentionedInBody.length) {
+        const groups = { character: [], location: [], lore: [] };
+        for (const m of mentionedInBody) groups[m.type]?.push(m);
+        sections.push('#### Codex Mentioned', '');
+        for (const [type, items] of Object.entries(groups)) {
+          if (items.length) sections.push(`- **${titleCase(type)}:** ${items.map((item) => item.name).join(', ')}`);
+        }
+        sections.push('');
+      }
+
+      const entryTerms = [entry.name, ...(entry.aliases ?? [])].map((t) => String(t ?? '').trim()).filter(Boolean);
+      if (entryTerms.length && chapters.length) {
+        const matchedChapters = [];
+        for (const chapter of chapters) {
+          const text = (chapter.scenes ?? []).flatMap((s) => s.paragraphs ?? []).join('\n\n');
+          if (entryTerms.some((term) => containsTerm(text, term))) matchedChapters.push(chapter);
+        }
+        if (matchedChapters.length) {
+          sections.push('#### Chapters Mentioned', '');
+          for (const chapter of matchedChapters) {
+            sections.push(`- **Chapter ${chapter.chapterNumber}:** ${chapter.title}`);
+          }
+          sections.push('');
+        }
+      }
+
+      sections.push(entry.body.trim() || '_No body content._', '');
     }
   }
 

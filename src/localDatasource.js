@@ -291,6 +291,17 @@ export async function deleteCodexEntry(rootHandle, category, id) {
 export async function compileCodex(rootHandle) {
   const codex = await listCodexEntries(rootHandle);
   const entries = Object.values(codex).flatMap((items) => items ?? []);
+  const volumes = await listVolumes(rootHandle);
+  const chapters = [];
+  for (const volume of volumes) {
+    try {
+      const data = await readVolume(rootHandle, volume.id);
+      for (const chapter of data.novel.chapters) {
+        chapters.push(chapter);
+      }
+    } catch {}
+  }
+
   const lines = [
     '# Compiled Codex',
     '',
@@ -300,12 +311,52 @@ export async function compileCodex(rootHandle) {
     ''
   ];
 
+  function serializeEntryCodexMentioned(entry) {
+    const text = entry.body || '';
+    const mentioned = [];
+    for (const other of entries) {
+      if (other.id === entry.id && other.category === entry.category) continue;
+      const terms = [other.name, ...(other.aliases ?? [])].map((t) => String(t ?? '').trim()).filter(Boolean);
+      if (terms.some((term) => containsTerm(text, term))) mentioned.push(other);
+    }
+    mentioned.sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+    if (!mentioned.length) return [];
+    const groups = { character: [], location: [], lore: [] };
+    for (const m of mentioned) groups[m.type]?.push(m);
+    const result = ['#### Codex Mentioned', ''];
+    for (const [type, items] of Object.entries(groups)) {
+      if (items.length) result.push(`- **${titleCase(type)}:** ${items.map((item) => item.name).join(', ')}`);
+    }
+    result.push('');
+    return result;
+  }
+
+  function serializeEntryChaptersMentioned(entry) {
+    const terms = [entry.name, ...(entry.aliases ?? [])].map((t) => String(t ?? '').trim()).filter(Boolean);
+    if (!terms.length) return [];
+    const matched = [];
+    for (const chapter of chapters) {
+      const text = (chapter.scenes ?? []).flatMap((s) => s.paragraphs ?? []).join('\n\n');
+      if (terms.some((term) => containsTerm(text, term))) matched.push(chapter);
+    }
+    if (!matched.length) return [];
+    const result = ['#### Chapters Mentioned', ''];
+    for (const chapter of matched) {
+      result.push(`- **Chapter ${chapter.chapterNumber}:** ${chapter.title}`);
+    }
+    result.push('');
+    return result;
+  }
+
   for (const category of codexCategories) {
     const categoryEntries = codex[category] ?? [];
     if (!categoryEntries.length) continue;
     lines.push(`## ${titleCase(category)}`, '');
     for (const entry of categoryEntries) {
-      lines.push(`### ${entry.name}`, '', `- Type: ${entry.type}`, `- Source: ${entry.path}`, `- Aliases: ${formatList(entry.aliases)}`, `- Tags: ${formatList(entry.tags)}`, '', entry.body || 'No details yet.', '');
+      lines.push(`### ${entry.name}`, '', `- Type: ${entry.type}`, `- Source: ${entry.path}`, `- Aliases: ${formatList(entry.aliases)}`, `- Tags: ${formatList(entry.tags)}`, '');
+      lines.push(...serializeEntryCodexMentioned(entry));
+      lines.push(...serializeEntryChaptersMentioned(entry));
+      lines.push(entry.body || 'No details yet.', '');
     }
   }
 
