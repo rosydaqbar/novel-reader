@@ -249,7 +249,7 @@ export function serializeCodexEntry(entry) {
     `alwaysIncludeInContext: ${Boolean(entry.alwaysIncludeInContext)}`,
     `doNotTrack: ${Boolean(entry.doNotTrack)}`,
     `noAutoInclude: ${Boolean(entry.noAutoInclude)}`,
-    'fields: {}',
+    `fields: ${JSON.stringify(normalizeFields(entry.fields))}`,
     '---',
     String(entry.body ?? '').trim(),
     ''
@@ -296,6 +296,12 @@ function parseScalar(value) {
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
+  if (value.startsWith('{') && value.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
   return value.replace(/^['"]|['"]$/g, '');
 }
 
@@ -303,6 +309,10 @@ function serializeArray(key, values) {
   const list = (values ?? []).map((value) => String(value).trim()).filter(Boolean);
   if (!list.length) return [`${key}: []`];
   return [`${key}:`, ...list.map((value) => `  - ${value}`)];
+}
+
+function normalizeFields(fields) {
+  return fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {};
 }
 
 function countWords(text) {

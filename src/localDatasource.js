@@ -2,6 +2,7 @@ const codexCategories = ['characters', 'locations', 'lore'];
 const datasourceDbName = 'novel-reader-editor';
 const datasourceStoreName = 'handles';
 const datasourceHandleKey = 'recentDatasource';
+const projectHandleKey = 'recentProject';
 const typeByCategory = {
   characters: 'character',
   locations: 'location',
@@ -15,9 +16,13 @@ export function supportsLocalFiles() {
   return typeof window !== 'undefined' && 'showDirectoryPicker' in window;
 }
 
-export async function openDatasourceFolder() {
+export function supportsProjectFiles(scope = typeof window === 'undefined' ? null : window) {
+  return typeof scope?.showOpenFilePicker === 'function' && typeof scope?.showSaveFilePicker === 'function';
+}
+
+export async function openDatasourceFolder(mode = 'readwrite') {
   if (!supportsLocalFiles()) throw new Error('This browser does not support local folder editing. Use Chrome, Edge, or Brave.');
-  return window.showDirectoryPicker({ mode: 'readwrite' });
+  return window.showDirectoryPicker({ mode });
 }
 
 export async function saveRecentDatasourceHandle(handle) {
@@ -29,6 +34,22 @@ export async function loadRecentDatasourceHandle() {
   if (!supportsLocalFiles()) return null;
   const database = await openHandleDatabase();
   return getStoreValue(database, datasourceHandleKey);
+}
+
+export async function saveRecentProjectHandle(handle) {
+  const database = await openHandleDatabase();
+  await putStoreValue(database, projectHandleKey, handle);
+}
+
+export async function loadRecentProjectHandle() {
+  if (!supportsProjectFiles()) return null;
+  const database = await openHandleDatabase();
+  return getStoreValue(database, projectHandleKey);
+}
+
+export async function clearRecentProjectHandle() {
+  const database = await openHandleDatabase();
+  await deleteStoreValue(database, projectHandleKey);
 }
 
 export async function verifyHandlePermission(handle, mode = 'readwrite') {
@@ -197,10 +218,9 @@ export async function listCodexEntries(rootHandle) {
 }
 
 export async function recoverCodexFromCompiledFile(rootHandle) {
-  const codexHandle = await getFileOrNull(rootHandle, 'codex.md');
-  if (!codexHandle) return { count: 0, skipped: 0, codex: await listCodexEntries(rootHandle) };
+  const entries = await readCompiledCodexEntries(rootHandle);
+  if (!entries.length) return { count: 0, skipped: 0, codex: await listCodexEntries(rootHandle) };
 
-  const entries = parseCompiledCodex(await readTextFile(codexHandle));
   let count = 0;
   let skipped = 0;
 
@@ -219,6 +239,11 @@ export async function recoverCodexFromCompiledFile(rootHandle) {
   }
 
   return { count, skipped, codex: await listCodexEntries(rootHandle) };
+}
+
+export async function readCompiledCodexEntries(rootHandle) {
+  const codexHandle = await getFileOrNull(rootHandle, 'codex.md');
+  return codexHandle ? parseCompiledCodex(await readTextFile(codexHandle)) : [];
 }
 
 export async function readCodexEntry(rootHandle, category, id) {
@@ -421,6 +446,15 @@ function putStoreValue(database, key, value) {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(datasourceStoreName, 'readwrite');
     transaction.objectStore(datasourceStoreName).put(value, key);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+  });
+}
+
+function deleteStoreValue(database, key) {
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(datasourceStoreName, 'readwrite');
+    transaction.objectStore(datasourceStoreName).delete(key);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
   });
@@ -643,12 +677,24 @@ function parseCompiledCodex(markdown) {
         name: entryMatch[1].trim(),
         meta: {},
         metadataComplete: false,
+        skippingGeneratedSection: false,
         bodyLines: []
       };
       continue;
     }
 
     if (!currentEntry) continue;
+
+    if (/^####\s+(Codex|Chapters) Mentioned\s*$/.test(line)) {
+      currentEntry.metadataComplete = true;
+      currentEntry.skippingGeneratedSection = true;
+      continue;
+    }
+
+    if (currentEntry.skippingGeneratedSection) {
+      if (!line.trim() || /^-\s+\*\*(?:Character|Location|Lore|Chapter\s+\d+):\*\*/.test(line)) continue;
+      currentEntry.skippingGeneratedSection = false;
+    }
 
     if (!currentEntry.metadataComplete) {
       const metadata = parseCompiledMetadataLine(line);
@@ -733,7 +779,7 @@ function serializeCodexEntry(entry) {
     `alwaysIncludeInContext: ${Boolean(entry.alwaysIncludeInContext)}`,
     `doNotTrack: ${Boolean(entry.doNotTrack)}`,
     `noAutoInclude: ${Boolean(entry.noAutoInclude)}`,
-    'fields: {}',
+    `fields: ${JSON.stringify(normalizeFields(entry.fields))}`,
     '---',
     String(entry.body ?? '').trim(),
     ''
@@ -766,6 +812,12 @@ function parseScalar(value) {
   if (value === 'true') return true;
   if (value === 'false') return false;
   if (value === 'null') return null;
+  if (value.startsWith('{') && value.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed;
+    } catch {}
+  }
   return value.replace(/^['"]|['"]$/g, '');
 }
 
@@ -773,6 +825,10 @@ function serializeArray(key, values) {
   const list = (values ?? []).map((value) => String(value).trim()).filter(Boolean);
   if (!list.length) return [`${key}: []`];
   return [`${key}:`, ...list.map((value) => `  - ${value}`)];
+}
+
+function normalizeFields(fields) {
+  return fields && typeof fields === 'object' && !Array.isArray(fields) ? fields : {};
 }
 
 function trimTrailingBlankLines(lines) {

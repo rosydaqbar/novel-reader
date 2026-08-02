@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Extension } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
@@ -10,29 +10,22 @@ import { Plugin, PluginKey } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
 import { Book, BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
 import {
-  compileCodex as compileLocalCodex,
-  createVolume as createLocalVolume,
-  createCodexEntry as createLocalCodexEntry,
-  createStarterNovel,
-  deleteCodexEntry as deleteLocalCodexEntry,
-  deleteVolume as deleteLocalVolume,
-  ensureCodexFolders,
-  flattenCodexEntries,
   hasHandlePermission,
-  listVolumes as listLocalVolumes,
-  listCodexEntries as listLocalCodexEntries,
-  loadRecentDatasourceHandle,
-  migrateLegacyActsToVolumes,
+  loadRecentProjectHandle,
   openDatasourceFolder,
-  readVolume,
-  readCodexEntry,
-  recoverCodexFromCompiledFile,
-  saveRecentDatasourceHandle,
+  saveRecentProjectHandle,
   supportsLocalFiles,
-  verifyHandlePermission,
-  writeVolume,
-  writeCodexEntry as writeLocalCodexEntry
+  verifyHandlePermission
 } from './localDatasource.js';
+import {
+  createProjectFile,
+  exportVolumeMarkdown,
+  importMarkdownDatasource,
+  loadProjectFile,
+  openProjectFile,
+  saveProjectFile,
+  supportsProjectFiles
+} from './browserDb.js';
 import '@fontsource/geist/400.css';
 import './styles.css';
 
@@ -135,14 +128,24 @@ function InterfaceBackground() {
 function App() {
   const savedUiState = useMemo(() => readUiState(), []);
   const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu ?? 'novel');
-  const [datasourceHandle, setDatasourceHandle] = useState(null);
-  const [recentDatasourceHandle, setRecentDatasourceHandle] = useState(null);
+  const [projectFile, setProjectFile] = useState(null);
+  const projectFileRef = useRef(null);
+  const [projectMeta, setProjectMeta] = useState(null);
+  const [projectRevision, setProjectRevision] = useState(0);
+  const [projectPersistenceDirty, setProjectPersistenceDirty] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const activationRequestRef = useRef(0);
+  const novelRevisionRef = useRef(0);
+  const codexRevisionRef = useRef(0);
+  const persistenceRevisionRef = useRef(0);
+  const saveInProgressRef = useRef(false);
+  const [recentProjectHandle, setRecentProjectHandle] = useState(null);
   const [volumes, setVolumes] = useState([]);
   const [volumesLoaded, setVolumesLoaded] = useState(false);
   const [selectedVolumeId, setSelectedVolumeId] = useState(savedUiState.selectedVolumeId ?? convertActIdToVolumeId(savedUiState.selectedActId) ?? 'volume1');
   const [novel, setNovel] = useState(null);
   const [selectedChapter, setSelectedChapter] = useState(savedUiState.selectedChapter ?? 0);
-  const [status, setStatus] = useState(supportsLocalFiles() ? 'Open or create a local datasource folder' : 'This app currently supports Chromium browsers only.');
+  const [status, setStatus] = useState(supportsProjectFiles() ? 'Open or create a Novel project' : 'This app currently supports Chromium browsers only.');
   const [dirty, setDirty] = useState(false);
   const selectedChapterRef = useRef(null);
   const [codex, setCodex] = useState(null);
@@ -154,10 +157,15 @@ function App() {
   const [codexSearch, setCodexSearch] = useState('');
   const [codexTagFilter, setCodexTagFilter] = useState('');
   const [codexAliasFilter, setCodexAliasFilter] = useState('');
+  const [projectSearch, setProjectSearch] = useState('');
+  const deferredProjectSearch = useDeferredValue(projectSearch);
+  const [pendingSearchTarget, setPendingSearchTarget] = useState(null);
   const [hoveredMention, setHoveredMention] = useState(null);
   const [chapterMentionDetail, setChapterMentionDetail] = useState(null);
   const [pendingParagraphAnchor, setPendingParagraphAnchor] = useState(null);
   const selectedCodexRef = useRef(null);
+  const unsavedStateRef = useRef(null);
+  unsavedStateRef.current = { codexDirty, dirty, isSaving, projectPersistenceDirty };
 
   useEffect(() => {
     let timeoutId;
@@ -181,25 +189,48 @@ function App() {
   const hoverHideTimerRef = useRef(null);
 
   useEffect(() => {
-    if (!supportsLocalFiles()) return;
+    if (!supportsProjectFiles()) return;
     let cancelled = false;
+    const requestId = ++activationRequestRef.current;
 
-    loadRecentDatasourceHandle()
+    loadRecentProjectHandle()
       .then(async (handle) => {
-        if (!handle || cancelled) return;
-        setRecentDatasourceHandle(handle);
+        if (!handle || cancelled || requestId !== activationRequestRef.current) return;
+        setRecentProjectHandle(handle);
         if (!(await hasHandlePermission(handle))) {
-          setStatus('Recent datasource needs permission. Click Restore recent datasource to continue.');
+          setStatus('Recent project needs permission. Click Restore recent project to continue.');
           return;
         }
-        await activateDatasource(handle, 'Restored recent datasource');
+        const project = await loadProjectFile(handle, { requestPermission: false });
+        if (cancelled || requestId !== activationRequestRef.current) {
+          project.close();
+          return;
+        }
+        await activateProject(project, 'Restored recent project', requestId);
       })
-      .catch((error) => setStatus(`Could not restore recent datasource: ${error.message}`));
+      .catch((error) => setStatus(`Could not restore recent project: ${error.message}`));
 
     return () => {
       cancelled = true;
+      if (activationRequestRef.current === requestId) activationRequestRef.current += 1;
     };
   }, []);
+
+  useEffect(() => () => {
+    try {
+      projectFileRef.current?.close();
+    } catch {}
+  }, []);
+
+  useEffect(() => {
+    if (!dirty && !codexDirty && !projectPersistenceDirty) return undefined;
+    const preventUnsavedClose = (event) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', preventUnsavedClose);
+    return () => window.removeEventListener('beforeunload', preventUnsavedClose);
+  }, [dirty, codexDirty, projectPersistenceDirty]);
 
   useEffect(() => {
     writeUiState({ activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId });
@@ -252,17 +283,17 @@ function App() {
     };
   }, [activeMenu, pendingParagraphAnchor, selectedChapter]);
 
-  const loadVolumes = async (handle = datasourceHandle) => {
-    if (!handle) return;
+  const loadVolumes = (project = projectFileRef.current) => {
+    if (!project) return;
     try {
-      const nextVolumes = await listLocalVolumes(handle);
+      const nextVolumes = project.projectDb.listVolumes();
       setVolumes(nextVolumes);
       setVolumesLoaded(true);
       if (nextVolumes.length && !nextVolumes.some((volume) => volume.id === selectedVolumeId)) setSelectedVolumeId(nextVolumes[0].id);
       if (!nextVolumes.length) {
         setNovel(null);
         setDirty(false);
-        setStatus('No novel found in this datasource');
+        setStatus('This project has no volumes');
       }
     } catch (error) {
       setVolumesLoaded(true);
@@ -270,14 +301,17 @@ function App() {
     }
   };
 
-  const loadNovel = async (nextStatus, useLocalDraft = true, volumeId = selectedVolumeId, handle = datasourceHandle) => {
-    if (!handle) return;
-    const volumeFilename = `${volumeId}.md`;
-    setStatus(`Loading ${volumeFilename}...`);
+  const loadNovel = (nextStatus, useLocalDraft = true, volumeId = selectedVolumeId, project = projectFileRef.current) => {
+    if (!project) return;
+    const volume = project.projectDb.getVolume(volumeId);
+    if (!volume) return;
+    setStatus(`Loading ${volume.filename}...`);
     try {
-      const data = await readVolume(handle, volumeId);
-      const draft = useLocalDraft ? readLocalDraft(novelDraftKey(volumeId)) : null;
+      const nextNovel = project.projectDb.getNovel(volumeId);
+      const projectId = project.projectDb.getProjectMeta().projectUuid;
+      const draft = useLocalDraft ? readLocalDraft(novelDraftKey(volumeId, projectId)) : null;
       if (draft?.novel) {
+        novelRevisionRef.current += 1;
         setNovel(draft.novel);
         setSelectedChapter(Math.min(draft.selectedChapter ?? 0, Math.max(draft.novel.chapters.length - 1, 0)));
         setDirty(true);
@@ -285,34 +319,29 @@ function App() {
         return;
       }
 
-      setNovel(data.novel);
-      setSelectedChapter((current) => Math.min(current, Math.max(data.novel.chapters.length - 1, 0)));
+      novelRevisionRef.current += 1;
+      setNovel(nextNovel);
+      setSelectedChapter((current) => Math.min(current, Math.max(nextNovel.chapters.length - 1, 0)));
       setDirty(false);
-      setStatus(nextStatus ?? `Loaded ${data.volume?.filename ?? volumeFilename}`);
+      setStatus(nextStatus ?? `Loaded ${volume.filename}`);
     } catch (error) {
       setStatus(`Failed to load: ${error.message}`);
     }
   };
 
   useEffect(() => {
-    if (!volumesLoaded || !volumes.length) return;
-    loadNovel(undefined, true, selectedVolumeId);
-  }, [volumesLoaded, volumes.length, selectedVolumeId, datasourceHandle]);
+    if (!projectFile || !volumesLoaded || !volumes.length) return;
+    loadNovel(undefined, true, selectedVolumeId, projectFile);
+  }, [projectFile, volumesLoaded, volumes.length, selectedVolumeId]);
 
   useEffect(() => {
-    if (!datasourceHandle || codex) return;
-    loadCodex();
-  }, [codex, datasourceHandle]);
-
-  useEffect(() => {
-    if (!novel || !dirty) return;
-    writeLocalDraft(novelDraftKey(selectedVolumeId), { novel, selectedChapter, savedAt: new Date().toISOString() });
-    setStatus('Saved locally');
-  }, [novel, selectedChapter, dirty, selectedVolumeId]);
+    if (!novel || !dirty || !projectMeta) return;
+    writeLocalDraft(novelDraftKey(selectedVolumeId, projectMeta.projectUuid), { novel, selectedChapter, savedAt: new Date().toISOString() });
+    setStatus('Draft saved in this browser');
+  }, [novel, selectedChapter, dirty, selectedVolumeId, projectMeta]);
 
   const selected = novel?.chapters[selectedChapter];
   const selectedVolume = volumes.find((volume) => volume.id === selectedVolumeId) ?? { id: selectedVolumeId, label: `Volume ${selectedVolumeId.replace('volume', '')}`, filename: `${selectedVolumeId}.md` };
-  const legacyVolumes = volumes.filter((volume) => volume.legacy);
   const selectedCodexCategory = codexCategories.find((category) => category.id === codexCategory) ?? codexCategories[0];
   const chapterCount = novel?.chapters.length ?? 0;
   const codexOptions = useMemo(() => getCodexOptions(codex), [codex]);
@@ -330,6 +359,19 @@ function App() {
       return matchesQuery && matchesTag && matchesAlias;
     });
   }, [codex, codexAliasFilter, codexCategory, codexSearch, codexTagFilter]);
+  const projectSearchResults = useMemo(() => {
+    const query = deferredProjectSearch.trim();
+    if (!query || !projectFile) return null;
+    try {
+      return {
+        scenes: projectFile.projectDb.searchScenes(query),
+        codex: projectFile.projectDb.searchCodex(query)
+      };
+    } catch (error) {
+      console.error('Project search failed', error);
+      return { scenes: [], codex: [] };
+    }
+  }, [deferredProjectSearch, projectFile, projectRevision]);
 
   useEffect(() => {
     selectedChapterRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -360,52 +402,64 @@ function App() {
   }, [codexCategory, codexVisibleEntries, selectedCodexId]);
 
   useEffect(() => {
-    if (!codexEntry || !codexDirty) return;
-    writeLocalDraft(codexDraftKey(codexEntry), { entry: codexEntry, savedAt: new Date().toISOString() });
-    setCodexStatus('Saved locally');
-  }, [codexEntry, codexDirty]);
+    if (!codexEntry || !codexDirty || !projectMeta) return;
+    writeLocalDraft(codexDraftKey(codexEntry, projectMeta.projectUuid), { entry: codexEntry, savedAt: new Date().toISOString() });
+    setCodexStatus('Draft saved in this browser');
+  }, [codexEntry, codexDirty, projectMeta]);
 
-  const loadCodexWithRecovery = async (handle) => {
-    const data = await listLocalCodexEntries(handle);
-    if (flattenCodexEntries(data).length) return { codex: data, recovered: 0 };
+  useEffect(() => {
+    if (!pendingSearchTarget || !novel || selectedVolumeId !== pendingSearchTarget.volumeId) return;
+    const chapterIndex = novel.chapters.findIndex((chapter) => chapter.id === pendingSearchTarget.chapterId);
+    if (chapterIndex < 0) return;
+    setSelectedChapter(chapterIndex);
+    setPendingParagraphAnchor({ sceneId: pendingSearchTarget.sceneId, paragraphIndex: 0 });
+    setPendingSearchTarget(null);
+  }, [novel, pendingSearchTarget, selectedVolumeId]);
 
-    const recovery = await recoverCodexFromCompiledFile(handle);
-    return { codex: recovery.codex, recovered: recovery.count };
-  };
-
-  const loadCodex = async () => {
-    if (!datasourceHandle) return;
-    setCodexStatus('Loading codex...');
+  const loadCodex = () => {
+    if (!projectFileRef.current) return;
     try {
-      const data = await loadCodexWithRecovery(datasourceHandle);
-      setCodex(data.codex);
-      setCodexStatus(data.recovered > 0 ? `Recovered ${data.recovered} codex entries from codex.md` : 'Loaded codex');
+      setCodex(projectFileRef.current.projectDb.listCodex());
+      setCodexStatus('Loaded codex');
     } catch (error) {
       setCodexStatus(`Failed to load codex: ${error.message}`);
     }
   };
 
   const loadCodexEntry = (category, id, useLocalDraft = true) => {
-    if (!datasourceHandle) return Promise.resolve();
+    if (!projectFileRef.current) return Promise.resolve();
     setCodexStatus('Loading entry...');
-    return readCodexEntry(datasourceHandle, category, id)
-      .then((entry) => {
-        const draft = useLocalDraft ? readLocalDraft(codexDraftKey(entry)) : null;
-        if (draft?.entry) {
-          setCodexEntry(draft.entry);
-          setCodexDirty(true);
-          setCodexStatus(`Loaded local draft from ${formatDateTime(draft.savedAt)}`);
-          return;
-        }
+    try {
+      const entry = projectFileRef.current.projectDb.getCodexEntry(category, id);
+      if (!entry) throw new Error('Codex entry was not found.');
+      const projectId = projectFileRef.current.projectDb.getProjectMeta().projectUuid;
+      const draft = useLocalDraft ? readLocalDraft(codexDraftKey(entry, projectId)) : null;
+      if (draft?.entry) {
+        codexRevisionRef.current += 1;
+        setCodexEntry(draft.entry);
+        setCodexDirty(true);
+        setCodexStatus(`Loaded local draft from ${formatDateTime(draft.savedAt)}`);
+        return Promise.resolve();
+      }
 
-        setCodexEntry(entry);
-        setCodexDirty(false);
-        setCodexStatus('Loaded entry');
-      })
-      .catch((error) => setCodexStatus(`Failed to load entry: ${error.message}`));
+      codexRevisionRef.current += 1;
+      setCodexEntry(entry);
+      setCodexDirty(false);
+      setCodexStatus('Loaded entry');
+      return Promise.resolve();
+    } catch (error) {
+      setCodexStatus(`Failed to load entry: ${error.message}`);
+      return Promise.resolve();
+    }
+  };
+
+  const markProjectMutated = () => {
+    persistenceRevisionRef.current += 1;
+    setProjectPersistenceDirty(true);
   };
 
   const updateCodexEntry = (patch) => {
+    codexRevisionRef.current += 1;
     setCodexEntry((current) => ({ ...current, ...patch }));
     setCodexDirty(true);
   };
@@ -419,25 +473,84 @@ function App() {
     setCodexStatus('Loading entry...');
   };
 
-  const saveCodexEntry = async () => {
-    setCodexStatus('Updating codex entry...');
+  const saveProject = async () => {
+    if (!projectFile || saveInProgressRef.current) return;
+    saveInProgressRef.current = true;
+    setIsSaving(true);
+    setStatus(`Saving ${projectFile.fileName || 'project.novel'}...`);
+    setCodexStatus('Saving project...');
+    const savingProject = projectFile;
+    const savingVolumeId = selectedVolumeId;
+    const savingCodexKey = codexEntry ? `${codexEntry.category}:${codexEntry.id}` : null;
+    const novelRevision = novelRevisionRef.current;
+    const codexRevision = codexRevisionRef.current;
+    const saveNovelDraft = dirty && Boolean(novel);
+    const saveCodexDraft = codexDirty && Boolean(codexEntry);
     try {
-      const entry = await writeLocalCodexEntry(datasourceHandle, codexEntry);
-      const nextCodex = await listLocalCodexEntries(datasourceHandle);
-      localStorage.removeItem(codexDraftKey(codexEntry));
-      setCodex(nextCodex);
-      setCodexEntry(entry);
-      setCodexDirty(false);
-      setCodexStatus('Updated codex entry');
+      const db = savingProject.projectDb;
+      if (saveNovelDraft) {
+        db.putNovel(savingVolumeId, novel);
+        markProjectMutated();
+      }
+      if (saveCodexDraft) {
+        db.updateCodexEntry(codexEntry.category, codexEntry.id, codexEntry);
+        markProjectMutated();
+      }
+      const persistenceRevision = persistenceRevisionRef.current;
+      await saveProjectFile(savingProject);
+      await saveRecentProjectHandle(savingProject.fileHandle);
+      setRecentProjectHandle(savingProject.fileHandle);
+      if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+
+      if (
+        saveNovelDraft
+        && projectFileRef.current === savingProject
+        && selectedVolumeId === savingVolumeId
+        && novelRevisionRef.current === novelRevision
+      ) {
+        localStorage.removeItem(novelDraftKey(savingVolumeId, projectMeta?.projectUuid));
+        setNovel(db.getNovel(savingVolumeId));
+        setDirty(false);
+      }
+      if (
+        saveCodexDraft
+        && projectFileRef.current === savingProject
+        && `${codexEntry?.category}:${codexEntry?.id}` === savingCodexKey
+        && codexRevisionRef.current === codexRevision
+      ) {
+        localStorage.removeItem(codexDraftKey(codexEntry, projectMeta?.projectUuid));
+        const entry = db.getCodexEntry(codexEntry.category, codexEntry.id);
+        setCodex(db.listCodex());
+        setCodexEntry(entry);
+        setCodexDirty(false);
+      }
+
+      setProjectMeta(db.getProjectMeta());
+      setProjectRevision((current) => current + 1);
+      const newerDraftRemains = novelRevisionRef.current !== novelRevision || codexRevisionRef.current !== codexRevision;
+      const savedStatus = newerDraftRemains
+        ? 'Saved earlier changes; a newer browser draft remains'
+        : `Saved ${savingProject.fileName || 'project.novel'}`;
+      setStatus(savedStatus);
+      setCodexStatus(savedStatus);
     } catch (error) {
-      setCodexStatus(`Update failed: ${error.message}`);
+      setStatus(`Save failed: ${error.message}`);
+      setCodexStatus(`Save failed: ${error.message}`);
+      setProjectPersistenceDirty(true);
+    } finally {
+      saveInProgressRef.current = false;
+      setIsSaving(false);
     }
+  };
+
+  const saveCodexEntry = async () => {
+    await saveProject();
   };
 
   const discardCodexChanges = () => {
     if (!codexDirty || !codexEntry) return;
-    if (!window.confirm('Discard the local codex draft and reload this entry from disk?')) return;
-    localStorage.removeItem(codexDraftKey(codexEntry));
+    if (!window.confirm('Discard the local codex draft and reload this entry from the project database?')) return;
+    localStorage.removeItem(codexDraftKey(codexEntry, projectMeta?.projectUuid));
     loadCodexEntry(codexEntry.category, codexEntry.id, false);
   };
 
@@ -446,32 +559,44 @@ function App() {
     if (!name) return;
     setCodexStatus('Creating codex entry...');
     try {
-      const entry = await createLocalCodexEntry(datasourceHandle, codexCategory, name);
-      const nextCodex = await listLocalCodexEntries(datasourceHandle);
-      setCodex(nextCodex);
+      const entry = projectFile.projectDb.createCodexEntry({ category: codexCategory, name });
+      codexRevisionRef.current += 1;
+      markProjectMutated();
+      const persistenceRevision = persistenceRevisionRef.current;
+      setCodex(projectFile.projectDb.listCodex());
       setSelectedCodexId(entry.id);
       setCodexEntry(entry);
       setCodexDirty(false);
-      setCodexStatus('Created codex entry');
+      setProjectRevision((current) => current + 1);
+      await saveProjectFile(projectFile);
+      if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+      setCodexStatus(`Created ${entry.name}`);
     } catch (error) {
+      setProjectPersistenceDirty(true);
       setCodexStatus(`Create failed: ${error.message}`);
     }
   };
 
   const deleteCodexEntry = async () => {
     if (!codexEntry) return;
-    if (!window.confirm(`Delete ${codexEntry.name}? This removes its entry folder.`)) return;
+    if (!window.confirm(`Delete ${codexEntry.name} from this project?`)) return;
     setCodexStatus('Deleting codex entry...');
     try {
-      await deleteLocalCodexEntry(datasourceHandle, codexEntry.category, codexEntry.id);
-      const nextCodex = await listLocalCodexEntries(datasourceHandle);
-      localStorage.removeItem(codexDraftKey(codexEntry));
-      setCodex(nextCodex);
+      projectFile.projectDb.deleteCodexEntry(codexEntry.category, codexEntry.id);
+      codexRevisionRef.current += 1;
+      markProjectMutated();
+      const persistenceRevision = persistenceRevisionRef.current;
+      setCodex(projectFile.projectDb.listCodex());
       setSelectedCodexId(null);
       setCodexEntry(null);
       setCodexDirty(false);
+      setProjectRevision((current) => current + 1);
+      await saveProjectFile(projectFile);
+      if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+      localStorage.removeItem(codexDraftKey(codexEntry, projectMeta?.projectUuid));
       setCodexStatus('Deleted codex entry');
     } catch (error) {
+      setProjectPersistenceDirty(true);
       setCodexStatus(`Delete failed: ${error.message}`);
     }
   };
@@ -495,63 +620,140 @@ function App() {
     window.clearTimeout(hoverHideTimerRef.current);
   };
 
-  const activateDatasource = async (handle, nextStatus = 'Loaded datasource') => {
-    await ensureCodexFolders(handle);
-    await saveRecentDatasourceHandle(handle);
-    const nextVolumes = await listLocalVolumes(handle);
-    const codexLoad = await loadCodexWithRecovery(handle);
-    const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id;
-
-    setDatasourceHandle(handle);
-    setCodex(codexLoad.codex);
-    setCodexStatus(codexLoad.recovered > 0 ? `Recovered ${codexLoad.recovered} codex entries from codex.md` : 'Loaded codex');
-    setVolumes(nextVolumes);
-    setVolumesLoaded(true);
-
-    if (nextVolumeId) {
-      const volume = nextVolumes.find((item) => item.id === nextVolumeId);
-      setSelectedVolumeId(nextVolumeId);
-      await loadNovel(`${nextStatus}: ${volume?.filename ?? `${nextVolumeId}.md`}`, true, nextVolumeId, handle);
-    } else {
+  const activateProject = async (project, nextStatus = 'Loaded project', requestId = ++activationRequestRef.current) => {
+    if (requestId !== activationRequestRef.current) {
+      project.close();
+      return false;
+    }
+    try {
+      const db = project.projectDb;
+      const nextVolumes = db.listVolumes();
+      const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id;
+      if (projectFileRef.current && projectFileRef.current !== project) projectFileRef.current.close();
+      projectFileRef.current = project;
+      setProjectFile(project);
+      setProjectMeta(db.getProjectMeta());
+      setRecentProjectHandle(project.fileHandle);
       setNovel(null);
       setDirty(false);
-      setStatus('No novel found in this datasource');
-    }
-  };
+      setSelectedChapter(0);
+      setCodex(db.listCodex());
+      setCodexEntry(null);
+      setCodexDirty(false);
+      setCodexStatus('Loaded codex');
+      setVolumes(nextVolumes);
+      setVolumesLoaded(true);
+      setProjectPersistenceDirty(false);
+      persistenceRevisionRef.current = 0;
+      novelRevisionRef.current += 1;
+      codexRevisionRef.current += 1;
+      setProjectRevision((current) => current + 1);
+      saveRecentProjectHandle(project.fileHandle).catch((error) => {
+        console.error('Failed to remember recent project handle', error);
+      });
 
-  const openDatasource = async () => {
-    setStatus('Opening local datasource...');
-    try {
-      const handle = await openDatasourceFolder();
-      await activateDatasource(handle, 'Loaded datasource');
+      if (nextVolumeId) {
+        setSelectedVolumeId(nextVolumeId);
+        setStatus(`${nextStatus}: ${project.fileName || 'project.novel'}`);
+      } else {
+        setStatus('This project has no volumes');
+      }
+      return true;
     } catch (error) {
-      setStatus(`Open failed: ${error.message}`);
+      if (projectFileRef.current !== project && !project.closed) project.close();
+      throw error;
     }
   };
 
-  const restoreRecentDatasource = async () => {
-    if (!recentDatasourceHandle) return;
-    setStatus('Restoring recent datasource...');
+  const canSwitchProject = () => {
+    const unsaved = unsavedStateRef.current;
+    if (unsaved.isSaving || projectFileRef.current?.saving) {
+      setStatus('Wait for the current project save to finish.');
+      return false;
+    }
+    if (!unsaved.dirty && !unsaved.codexDirty && !unsaved.projectPersistenceDirty) return true;
+    return window.confirm('Open another project and leave the current unsaved changes behind?');
+  };
+
+  const openProject = async () => {
+    if (!canSwitchProject()) return;
+    const requestId = ++activationRequestRef.current;
+    setStatus('Opening project...');
     try {
-      if (!(await verifyHandlePermission(recentDatasourceHandle))) {
-        setStatus('Folder permission was not granted.');
+      await activateProject(await openProjectFile(), 'Loaded project', requestId);
+    } catch (error) {
+      if (error.name !== 'AbortError') setStatus(`Open failed: ${error.message}`);
+    }
+  };
+
+  const restoreRecentProject = async () => {
+    if (!recentProjectHandle || !canSwitchProject()) return;
+    const requestId = ++activationRequestRef.current;
+    setStatus('Restoring recent project...');
+    try {
+      if (!(await verifyHandlePermission(recentProjectHandle))) {
+        setStatus('Project file permission was not granted.');
         return;
       }
-      await activateDatasource(recentDatasourceHandle, 'Restored recent datasource');
+      const project = await loadProjectFile(recentProjectHandle, { requestPermission: false });
+      await activateProject(project, 'Restored recent project', requestId);
     } catch (error) {
       setStatus(`Restore failed: ${error.message}`);
     }
   };
 
-  const createDatasource = async () => {
-    setStatus('Choose an empty folder or datasource folder...');
+  const createProject = async () => {
+    if (!canSwitchProject()) return;
+    const title = window.prompt('Project name:', 'Untitled Novel')?.trim();
+    if (!title) return;
+    const requestId = ++activationRequestRef.current;
+    setStatus('Creating project...');
     try {
-      const handle = await openDatasourceFolder();
-      setDatasourceHandle(handle);
-      await saveRecentDatasourceHandle(handle);
-      await createNovel(handle);
+      const project = await createProjectFile({ title });
+      const volume = project.projectDb.createVolume({ number: 1, title });
+      project.projectDb.putNovel(volume.id, starterNovel(volume.label, title));
+      await project.save();
+      await activateProject(project, 'Created project', requestId);
     } catch (error) {
-      setStatus(`Create failed: ${error.message}`);
+      if (error.name !== 'AbortError') setStatus(`Create failed: ${error.message}`);
+    }
+  };
+
+  const importMarkdownProject = async () => {
+    if (!canSwitchProject()) return;
+    const startingProject = projectFileRef.current;
+    const startingNovelRevision = novelRevisionRef.current;
+    const startingCodexRevision = codexRevisionRef.current;
+    const startingPersistenceRevision = persistenceRevisionRef.current;
+    const requestId = ++activationRequestRef.current;
+    setStatus('Choose the legacy markdown datasource folder...');
+    let importedProject;
+    try {
+      const sourceHandle = await openDatasourceFolder('read');
+      const result = await importMarkdownDatasource(sourceHandle, {
+        onProgress(progress) {
+          setStatus(`Importing ${progress.label} (${progress.current}/${progress.total})...`);
+        }
+      });
+      importedProject = result.project;
+      const sourceChangedDuringImport = projectFileRef.current !== startingProject
+        || novelRevisionRef.current !== startingNovelRevision
+        || codexRevisionRef.current !== startingCodexRevision
+        || persistenceRevisionRef.current !== startingPersistenceRevision;
+      if (sourceChangedDuringImport && !canSwitchProject()) {
+        importedProject.close();
+        return;
+      }
+      const activated = await activateProject(result.project, 'Imported markdown datasource', requestId);
+      if (!activated) return;
+      importedProject = null;
+      markProjectMutated();
+      setStatus(
+        `Imported ${result.volumeCount} volume${result.volumeCount === 1 ? '' : 's'} and ${result.codexCount} codex entr${result.codexCount === 1 ? 'y' : 'ies'}. Click Save project to create the .novel file.`
+      );
+    } catch (error) {
+      if (importedProject && projectFileRef.current !== importedProject && !importedProject.closed) importedProject.close();
+      if (error.name !== 'AbortError') setStatus(`Import failed: ${error.message}`);
     }
   };
 
@@ -559,6 +761,30 @@ function App() {
     setActiveMenu('codex');
     changeCodexCategory(entry.category);
     setSelectedCodexId(entry.id);
+  };
+
+  const openSceneSearchResult = (result) => {
+    setProjectSearch('');
+    setActiveMenu('novel');
+    setPendingSearchTarget(result);
+    if (result.volumeId === selectedVolumeId && novel) {
+      const chapterIndex = novel.chapters.findIndex((chapter) => chapter.id === result.chapterId);
+      if (chapterIndex >= 0) {
+        setSelectedChapter(chapterIndex);
+        setPendingParagraphAnchor({ sceneId: result.sceneId, paragraphIndex: 0 });
+        setPendingSearchTarget(null);
+      }
+      return;
+    }
+    setSelectedChapter(0);
+    setSelectedVolumeId(result.volumeId);
+  };
+
+  const openCodexSearchResult = (result) => {
+    setProjectSearch('');
+    setActiveMenu('codex');
+    changeCodexCategory(result.category);
+    setSelectedCodexId(result.entryId);
   };
 
   const hoverChapterEntry = (chapter, rect) => {
@@ -588,62 +814,67 @@ function App() {
     setActiveMenu('novel');
   };
 
-  const compileCodex = async () => {
-    setCodexStatus('Compiling codex.md...');
-    try {
-      const data = await compileLocalCodex(datasourceHandle);
-      setCodexStatus(`Compiled ${data.path} with ${data.count} entries`);
-    } catch (error) {
-      setCodexStatus(`Compile failed: ${error.message}`);
-    }
+  const saveNovel = async () => {
+    await saveProject();
   };
 
-  const saveNovel = async () => {
-    setStatus(`Saving ${selectedVolume.filename}...`);
+  const exportMarkdown = async () => {
+    setStatus(`Exporting ${selectedVolume.filename}...`);
     try {
-      const data = await writeVolume(datasourceHandle, selectedVolumeId, novel, flattenCodexEntries(codex));
-      localStorage.removeItem(novelDraftKey(selectedVolumeId));
-      setNovel(data.novel);
-      setDirty(false);
-      setStatus(`Updated ${data.volume?.filename ?? selectedVolume.filename}`);
+      await exportVolumeMarkdown(projectFile, selectedVolumeId, { novel });
+      setStatus(`Exported ${selectedVolume.filename}`);
     } catch (error) {
-      setStatus(`Save failed: ${error.message}`);
+      if (error.name !== 'AbortError') setStatus(`Export failed: ${error.message}`);
     }
   };
 
   const addVolume = async () => {
     setStatus('Creating volume...');
     try {
-      const volume = await createLocalVolume(datasourceHandle, novel?.title || 'Untitled Novel');
-      const nextVolumes = await listLocalVolumes(datasourceHandle);
-      const data = await readVolume(datasourceHandle, volume.id);
+      const title = novel?.title || projectMeta?.title || 'Untitled Novel';
+      const volume = projectFile.projectDb.createVolume({ title });
+      projectFile.projectDb.putNovel(volume.id, starterNovel(volume.label, title));
+      novelRevisionRef.current += 1;
+      markProjectMutated();
+      const persistenceRevision = persistenceRevisionRef.current;
+      const nextVolumes = projectFile.projectDb.listVolumes();
       setVolumes(nextVolumes);
       setSelectedVolumeId(volume.id);
-      setNovel(data.novel);
+      setNovel(projectFile.projectDb.getNovel(volume.id));
       setSelectedChapter(0);
       setDirty(false);
-      setStatus(`Created ${volume.filename}`);
+      setProjectRevision((current) => current + 1);
+      await saveProjectFile(projectFile);
+      if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+      setStatus(`Created ${volume.filename} in ${projectFile.fileName}`);
     } catch (error) {
+      setProjectPersistenceDirty(true);
       setStatus(`Create failed: ${error.message}`);
     }
   };
 
   const deleteVolume = async () => {
     if (!selectedVolume) return;
-    if (!window.confirm(`Delete ${selectedVolume.filename}? This removes the markdown file from your local datasource folder.`)) return;
+    if (!window.confirm(`Delete ${selectedVolume.label} from this project?`)) return;
 
-    setStatus(`Deleting ${selectedVolume.filename}...`);
+    setStatus(`Deleting ${selectedVolume.label}...`);
     try {
-      await deleteLocalVolume(datasourceHandle, selectedVolume);
-      localStorage.removeItem(novelDraftKey(selectedVolume.id));
-      const nextVolumes = await listLocalVolumes(datasourceHandle);
+      projectFile.projectDb.deleteVolume(selectedVolume.id);
+      novelRevisionRef.current += 1;
+      markProjectMutated();
+      const persistenceRevision = persistenceRevisionRef.current;
+      const nextVolumes = projectFile.projectDb.listVolumes();
       setVolumes(nextVolumes);
+      setProjectRevision((current) => current + 1);
 
       if (!nextVolumes.length) {
         setNovel(null);
         setDirty(false);
         setVolumesLoaded(true);
-        setStatus(`Deleted ${selectedVolume.filename}`);
+        await saveProjectFile(projectFile);
+        if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+        localStorage.removeItem(novelDraftKey(selectedVolume.id, projectMeta?.projectUuid));
+        setStatus(`Deleted ${selectedVolume.label}`);
         return;
       }
 
@@ -651,52 +882,14 @@ function App() {
       const nextVolume = nextVolumes[Math.max(0, Math.min(currentIndex, nextVolumes.length - 1))];
       setSelectedVolumeId(nextVolume.id);
       setSelectedChapter(0);
-      await loadNovel(`Deleted ${selectedVolume.filename}`, false, nextVolume.id);
+      setNovel(projectFile.projectDb.getNovel(nextVolume.id));
+      await saveProjectFile(projectFile);
+      if (persistenceRevisionRef.current === persistenceRevision) setProjectPersistenceDirty(false);
+      localStorage.removeItem(novelDraftKey(selectedVolume.id, projectMeta?.projectUuid));
+      setStatus(`Deleted ${selectedVolume.label}`);
     } catch (error) {
+      setProjectPersistenceDirty(true);
       setStatus(`Delete failed: ${error.message}`);
-    }
-  };
-
-  const migrateLegacyVolumes = async () => {
-    if (!legacyVolumes.length) return;
-    const count = legacyVolumes.length;
-    if (!window.confirm(`Migrate ${count} legacy act ${count === 1 ? 'file' : 'files'} into volumes/? This copies act*.md to volume*.md and keeps the old files untouched.`)) return;
-
-    setStatus('Migrating legacy act files...');
-    try {
-      const result = await migrateLegacyActsToVolumes(datasourceHandle);
-      const nextVolumes = await listLocalVolumes(datasourceHandle);
-      setVolumes(nextVolumes);
-      const nextVolumeId = nextVolumes.some((volume) => volume.id === selectedVolumeId) ? selectedVolumeId : nextVolumes[0]?.id ?? 'volume1';
-      setSelectedVolumeId(nextVolumeId);
-      await loadNovel(`Migrated ${result.migrated} ${result.migrated === 1 ? 'file' : 'files'} to volumes/`, false, nextVolumeId);
-    } catch (error) {
-      setStatus(`Migration failed: ${error.message}`);
-    }
-  };
-
-  const createNovel = async (handle = datasourceHandle) => {
-    const title = window.prompt('Novel name:', 'Untitled Novel')?.trim();
-    if (!title) return;
-
-    setStatus('Creating novel...');
-    try {
-      await saveRecentDatasourceHandle(handle);
-      await createStarterNovel(handle, title);
-      await ensureCodexFolders(handle);
-      const nextVolumes = await listLocalVolumes(handle);
-      const data = await readVolume(handle, 'volume1');
-      const nextCodex = await listLocalCodexEntries(handle);
-      setVolumes(nextVolumes);
-      setVolumesLoaded(true);
-      setCodex(nextCodex);
-      setSelectedVolumeId('volume1');
-      setNovel(data.novel);
-      setSelectedChapter(0);
-      setDirty(false);
-      setStatus('Created volume1.md');
-    } catch (error) {
-      setStatus(`Create failed: ${error.message}`);
     }
   };
 
@@ -707,6 +900,7 @@ function App() {
   };
 
   const updateChapter = (chapterId, patch) => {
+    novelRevisionRef.current += 1;
     setNovel((current) => ({
       ...current,
       chapters: current.chapters.map((chapter) => (chapter.id === chapterId ? { ...chapter, ...patch } : chapter))
@@ -715,6 +909,7 @@ function App() {
   };
 
   const updateScene = (chapterId, sceneId, patch) => {
+    novelRevisionRef.current += 1;
     setNovel((current) => ({
       ...current,
       chapters: current.chapters.map((chapter) => {
@@ -729,6 +924,7 @@ function App() {
   };
 
   const addScene = (chapterId) => {
+    novelRevisionRef.current += 1;
     setNovel((current) => ({
       ...current,
       chapters: current.chapters.map((chapter) => {
@@ -755,6 +951,7 @@ function App() {
       return;
     }
 
+    novelRevisionRef.current += 1;
     setNovel((current) => ({
       ...current,
       chapters: current.chapters.map((chapter) => {
@@ -769,6 +966,7 @@ function App() {
   };
 
   const addChapter = () => {
+    novelRevisionRef.current += 1;
     const chapterNumber = Math.max(0, ...novel.chapters.map((chapter) => chapter.chapterNumber)) + 1;
     const nextChapter = {
       id: `chapter-${crypto.randomUUID()}`,
@@ -800,6 +998,7 @@ function App() {
       return;
     }
 
+    novelRevisionRef.current += 1;
     setNovel((current) => ({
       ...current,
       chapters: current.chapters.filter((item) => item.id !== chapterId)
@@ -810,17 +1009,17 @@ function App() {
 
   const discardChanges = () => {
     if (!dirty) return;
-    if (!window.confirm(`Discard the local draft and reload ${selectedVolume.filename} from disk?`)) return;
-    localStorage.removeItem(novelDraftKey(selectedVolumeId));
+    if (!window.confirm(`Discard the browser draft and reload ${selectedVolume.label} from the project database?`)) return;
+    localStorage.removeItem(novelDraftKey(selectedVolumeId, projectMeta?.projectUuid));
     loadNovel('Discarded local draft', false, selectedVolumeId);
   };
 
-  if (!datasourceHandle) {
-    return <WelcomeEmptyState onCreate={createDatasource} onOpen={openDatasource} onRestore={recentDatasourceHandle ? restoreRecentDatasource : null} status={status} supported={supportsLocalFiles()} />;
+  if (!projectFile) {
+    return <WelcomeEmptyState onCreate={createProject} onImport={supportsLocalFiles() ? importMarkdownProject : null} onOpen={openProject} onRestore={recentProjectHandle ? restoreRecentProject : null} status={status} supported={supportsProjectFiles()} />;
   }
 
   if (!novel && volumesLoaded && !volumes.length) {
-    return <WelcomeEmptyState onCreate={() => createNovel(datasourceHandle)} status={status} supported={supportsLocalFiles()} />;
+    return <WelcomeEmptyState onCreate={addVolume} onImport={supportsLocalFiles() ? importMarkdownProject : null} onOpen={openProject} status={status} supported={supportsProjectFiles()} />;
   }
 
   if (!novel) {
@@ -849,9 +1048,60 @@ function App() {
 
         <div className="brand">
           <span className="eyebrow">{activeMenu === 'novel' ? 'Novel' : 'Codex'}</span>
-          <strong>{novel.title || 'Imported Novel'}</strong>
+          <strong>{projectMeta?.title || novel.title || 'Untitled Project'}</strong>
         </div>
-        {activeMenu === 'novel' ? (
+        <div className="stats">
+          <span>{projectFile.fileName || 'project.novel'}</span>
+          <button className="button sidebarAction" onClick={saveProject} type="button">
+            Save project
+          </button>
+          <button className="button sidebarAction" onClick={openProject} type="button">
+            Open project
+          </button>
+          {supportsLocalFiles() && (
+            <button className="button sidebarAction" onClick={importMarkdownProject} type="button">
+              Import Markdown
+            </button>
+          )}
+        </div>
+        <div className="codexFilters">
+          <input
+            aria-label="Search project"
+            onChange={(event) => setProjectSearch(event.target.value)}
+            placeholder="Search scenes and codex..."
+            value={projectSearch}
+          />
+          {projectSearch && (
+            <button className="button ghost filterClear" onClick={() => setProjectSearch('')} type="button">
+              Clear search
+            </button>
+          )}
+        </div>
+        {projectSearch.trim() ? (
+          <nav className="chapterList" aria-label="Project search results">
+            {(projectSearchResults?.scenes ?? []).map((result) => (
+              <button className="chapterLink" key={`scene:${result.sceneId}`} onClick={() => openSceneSearchResult(result)} type="button">
+                <span className="chapterLinkMeta">
+                  <span>Volume {result.volumeNumber}, Chapter {result.chapterNumber}</span>
+                  <small>{result.heading}</small>
+                </span>
+                <strong>{result.snippet || result.chapterTitle}</strong>
+              </button>
+            ))}
+            {(projectSearchResults?.codex ?? []).map((result) => (
+              <button className="chapterLink" key={`codex:${result.entryInternalId}`} onClick={() => openCodexSearchResult(result)} type="button">
+                <span className="chapterLinkMeta">
+                  <span>{result.category}</span>
+                  <small>Codex</small>
+                </span>
+                <strong>{result.name}: {result.snippet}</strong>
+              </button>
+            ))}
+            {projectSearchResults && !projectSearchResults.scenes.length && !projectSearchResults.codex.length && (
+              <div className="emptyMenuState"><p>No project results found.</p></div>
+            )}
+          </nav>
+        ) : activeMenu === 'novel' ? (
           <>
             <div className="volumeTabs" role="tablist" aria-label="Volumes">
               {volumes.map((volume) => (
@@ -879,15 +1129,6 @@ function App() {
                 Add chapter
               </button>
             </div>
-            {legacyVolumes.length > 0 && (
-              <div className="migrationNotice">
-                <strong>Legacy act files detected</strong>
-                <p>{legacyVolumes.length} old act {legacyVolumes.length === 1 ? 'file is' : 'files are'} still being read from `acts/`. Migrate them to `volumes/` when you are ready.</p>
-                <button className="button secondary" onClick={migrateLegacyVolumes} type="button">
-                  Migrate to volumes
-                </button>
-              </div>
-            )}
             <nav className="chapterList" aria-label="Chapters">
               {novel.chapters.map((chapter, index) => (
                 <button
@@ -908,11 +1149,6 @@ function App() {
           </>
         ) : (
           <>
-            <div className="stats">
-              <button className="button sidebarAction compileAction" onClick={compileCodex} type="button">
-                Compile codex.md
-              </button>
-            </div>
             <div className="codexTabs" role="tablist" aria-label="Codex categories">
               {codexCategories.map((category) => (
                 <button
@@ -1001,11 +1237,14 @@ function App() {
                 <button className="button secondary" disabled={!dirty} onClick={discardChanges} type="button">
                   Discard
                 </button>
+                <button className="button secondary" onClick={exportMarkdown} type="button">
+                  Export Markdown
+                </button>
                 <button className="button secondary dangerText" onClick={deleteVolume} type="button">
                   Remove volume
                 </button>
-                <button className="button primary" disabled={!dirty} onClick={saveNovel} type="button">
-                  Update {selectedVolume.filename}
+                <button className="button primary" onClick={saveNovel} type="button">
+                  Save project
                 </button>
               </div>
             </header>
@@ -1206,8 +1445,8 @@ function CodexEditor({ category, options, dirty, entry, status, novel, mentionIn
           <button className="button secondary" disabled={!dirty} onClick={onDiscard} type="button">
             Discard
           </button>
-          <button className="button primary" disabled={!dirty} onClick={onSave} type="button">
-            Update entry
+          <button className="button primary" onClick={onSave} type="button">
+            Save project
           </button>
         </div>
       </header>
@@ -1662,7 +1901,7 @@ function HighlightText({ text, highlights }) {
   return parts;
 }
 
-function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
+function WelcomeEmptyState({ onCreate, onImport, onOpen, onRestore, status, supported }) {
   if (!supported) {
     return (
       <main className="welcomeShell">
@@ -1670,9 +1909,9 @@ function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
           <p className="eyebrow">Novel Reader Editor</p>
           <h1>Chromium browser required</h1>
           <p>
-            This editor saves markdown directly to a local folder using the browser File System Access API. That workflow is currently supported in Chromium browsers only.
+            This editor saves a local .novel project using the browser File System Access API. That workflow is currently supported in Chromium browsers only.
           </p>
-          <p>Use Chrome, Edge, Brave, or another Chromium-based browser to open or create a datasource.</p>
+          <p>Use Chrome, Edge, Brave, or another Chromium-based browser to open or create a project.</p>
           <div className="welcomeActions">
             <span>{status}</span>
           </div>
@@ -1685,23 +1924,28 @@ function WelcomeEmptyState({ onCreate, onOpen, onRestore, status, supported }) {
     <main className="welcomeShell">
       <section className="welcomeCard">
         <p className="eyebrow">Novel Reader Editor</p>
-        <h1>Use a local datasource folder</h1>
+        <h1>Open a local Novel project</h1>
         <p>
-          Open an existing local folder or create a new one. Manuscript and codex markdown files stay on your computer and are not uploaded to a server.
+          Open an existing .novel file, create a new one, or import a legacy markdown datasource folder. Your manuscript and codex stay on this computer.
         </p>
         <div className="welcomeActions">
           {onRestore && (
             <button className="button secondary" disabled={!supported} onClick={onRestore} type="button">
-              Restore recent datasource
+              Restore recent project
             </button>
           )}
           {onOpen && (
             <button className="button secondary" disabled={!supported} onClick={onOpen} type="button">
-              Open local datasource
+              Open project
+            </button>
+          )}
+          {onImport && (
+            <button className="button secondary" disabled={!supported} onClick={onImport} type="button">
+              Import Markdown
             </button>
           )}
           <button className="button primary" disabled={!supported} onClick={onCreate} type="button">
-            Create new Novel
+            Create project
           </button>
           <span>{status}</span>
         </div>
@@ -2017,8 +2261,8 @@ function formatNumber(value) {
   return new Intl.NumberFormat().format(value ?? 0);
 }
 
-function codexDraftKey(entry) {
-  return `${CODEX_DRAFT_PREFIX}${entry.category}:${entry.id}`;
+function codexDraftKey(entry, projectId = 'unscoped') {
+  return `${CODEX_DRAFT_PREFIX}${projectId}:${entry.category}:${entry.id}`;
 }
 
 function readUiState() {
@@ -2038,8 +2282,22 @@ function writeUiState(state) {
   }
 }
 
-function novelDraftKey(volumeId) {
-  return `${DRAFT_PREFIX}${volumeId}`;
+function novelDraftKey(volumeId, projectId = 'unscoped') {
+  return `${DRAFT_PREFIX}${projectId}:${volumeId}`;
+}
+
+function starterNovel(volumeLabel, title) {
+  return {
+    header: [`## ${title}`, ''],
+    title,
+    chapters: [
+      {
+        chapterNumber: 1,
+        title: `${volumeLabel} Opening`,
+        scenes: [{ heading: 'Scene 1', paragraphs: ['Start writing here...'] }]
+      }
+    ]
+  };
 }
 
 function convertActIdToVolumeId(id) {

@@ -1,6 +1,6 @@
 # Novel Reader Editor
 
-A browser-based editor for managing a novel manuscript and its codex. The app can be deployed publicly while manuscript data stays in a folder selected by each user on their own computer.
+A browser-based editor for managing a novel manuscript and its codex in one local `.novel` SQLite project file. The app can be deployed publicly while manuscript data stays on each user's computer.
 
 ## What It Does
 
@@ -8,17 +8,18 @@ A browser-based editor for managing a novel manuscript and its codex. The app ca
 - Edits codex entries for characters, locations, and lore.
 - Detects codex mentions inside novel chapters.
 - Shows mentioned codex entries in the chapter view.
-- Compiles individual codex entries into one `codex.md` file.
-- Saves drafts locally in the browser before writing back to the selected folder.
+- Searches manuscript scenes and codex entries.
+- Exports volumes to Markdown when needed.
+- Saves recovery drafts locally before writing the complete project file.
 
-## Local Folder Workflow
+## Local Project Workflow
 
 The app uses the browser File System Access API.
 
 - User opens the public website.
-- User chooses `Open local datasource` or `Create new Novel`.
-- Browser asks for permission to access a local folder.
-- Markdown files are read and written directly in that folder.
+- User chooses `Open project` or `Create project`.
+- Browser asks for permission to access one local `.novel` file.
+- The SQLite project is loaded through SQL.js and written directly back to that file.
 - No manuscript or codex data is uploaded to the app host.
 
 Supported browsers:
@@ -27,21 +28,11 @@ Supported browsers:
 - Edge
 - Brave
 
-Firefox and Safari are blocked because they do not support the required writable local folder workflow.
+Firefox and Safari are blocked because they do not support the required writable local file workflow.
 
 ## Novel
 
-Novel content is organized by volume.
-
-Expected selected folder structure:
-
-```txt
-volumes/
-  volume1.md
-  volume2.md
-```
-
-Each volume file contains chapters and scenes. The editor parses markdown headings into editable sections.
+Novel content is organized by volume, chapter, scene, and paragraph inside the project database. Markdown import/export uses the same heading structure as earlier versions.
 
 Supported structure:
 
@@ -62,21 +53,13 @@ Novel features:
 - Add, edit, and delete chapters.
 - Add, edit, collapse, and delete scenes.
 - Save changes locally first.
-- Update the active volume file when ready.
+- Save all project data to one `.novel` file.
+- Export the active volume to Markdown.
 - Automatically generate `Codex Mentioned` sections for detected entries.
 
 ## Codex
 
-Codex content is organized by category.
-
-Expected selected folder structure:
-
-```txt
-codex/
-  characters/
-  locations/
-  lore/
-```
+Codex content is organized by category inside the project database.
 
 Codex categories:
 
@@ -91,15 +74,29 @@ Codex features:
 - Search and filter by tags or aliases.
 - Highlight mentions in novel text.
 - Show hover cards for matched codex terms.
-- Compile all entries into `codex.md` in the selected folder.
+- Persist aliases, tags, flags, fields, bodies, and mention occurrences in the project.
 
-## Local Data
+## Markdown Migration
 
-The local datasource folder contains private manuscript and codex data. It is intentionally ignored by Git.
+In the browser, choose `Import Markdown`, select the legacy datasource folder, review the imported project, then choose `Save project` to create the converted `.novel` file. The source folder is read-only and remains unchanged.
 
-Use your own local folder when running the editor. In public deployments, each user selects their own folder and maintains their own markdown files.
+The repo-local server uses `datasource/project.novel` by default. Convert an existing markdown datasource without modifying its source files:
+
+```sh
+npm run migrate:novel
+```
+
+Custom paths and replacement are supported:
+
+```sh
+npm run migrate:novel -- --source path/to/datasource --output path/to/project.novel --force
+```
+
+Set `NOVEL_STORAGE_MODE=markdown` when running the server to use the legacy repo-backed markdown endpoints instead of `project.novel`.
 
 ## Development
+
+Node.js 22 or newer is required for the native server SQLite adapter.
 
 Install dependencies:
 
@@ -119,6 +116,12 @@ Build the frontend:
 npm run build
 ```
 
+Run the test suite:
+
+```sh
+npm test
+```
+
 Run the production server after building:
 
 ```sh
@@ -129,5 +132,6 @@ npm run preview
 
 - The server runs on `127.0.0.1:3001` by default during local development.
 - Public deployment can serve the built frontend as a static site.
-- Browser local storage is used for unsaved drafts.
-- `codex.md` is generated output, not the primary codex source.
+- Browser local storage is used for unsaved, project-scoped recovery drafts.
+- Markdown is an import/export compatibility format, not the primary project source.
+- `codex.md` remains generated output in legacy markdown mode.
