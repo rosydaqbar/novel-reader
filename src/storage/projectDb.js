@@ -536,8 +536,10 @@ export class ProjectDb {
   getMentionsForScene(sceneId, options = {}) {
     this._requireScene(sceneId);
     const rows = this.adapter.all(
-      `SELECT m.*, e.legacy_id, e.category_id, e.name, e.type
-       FROM codex_mentions m JOIN codex_entries e ON e.internal_id = m.entry_internal_id
+      `SELECT m.*, e.legacy_id, e.category_id, e.name, e.type, p.content AS paragraph_content
+       FROM codex_mentions m
+       JOIN codex_entries e ON e.internal_id = m.entry_internal_id
+       JOIN scene_paragraphs p ON p.id = m.paragraph_id
        WHERE m.scene_id = ?
        ORDER BY m.paragraph_index, m.start_offset, (m.end_offset - m.start_offset) DESC, e.name`,
       [sceneId]
@@ -558,7 +560,12 @@ export class ProjectDb {
       }
       return [...grouped.values()];
     }
-    return rows.map((row) => ({
+    return rows.map((row) => {
+      const contextText = String(row.paragraph_content ?? '').slice(
+        Math.max(0, Number(row.start_offset) - 60),
+        Math.min(String(row.paragraph_content ?? '').length, Number(row.end_offset) + 60)
+      );
+      return {
       id: Number(row.id),
       entryId: row.legacy_id,
       entryInternalId: row.entry_internal_id,
@@ -571,9 +578,10 @@ export class ProjectDb {
       term: row.term,
       startOffset: Number(row.start_offset),
       endOffset: Number(row.end_offset),
-      context: row.context_text,
-      contextText: row.context_text
-    }));
+        context: contextText,
+        contextText
+      };
+    });
   }
 
   searchScenes(query) {
@@ -598,10 +606,20 @@ export class ProjectDb {
       }
     }
     return this.adapter.all(
-      `SELECT s.id AS scene_id, s.chapter_id, c.volume_id, c.chapter_number,
-         v.number AS volume_number, c.title AS chapter_title, s.heading, d.content
-       FROM scene_search_documents d
-       JOIN scenes s ON s.id = d.scene_id
+      `WITH scene_documents AS (
+         SELECT s.id AS scene_id,
+           s.heading || COALESCE((
+             SELECT char(10) || char(10) || group_concat(content, char(10) || char(10))
+             FROM (
+               SELECT content FROM scene_paragraphs WHERE scene_id = s.id ORDER BY sort_order
+             )
+           ), '') AS content
+         FROM scenes s
+       )
+       SELECT s.id AS scene_id, s.chapter_id, c.volume_id, c.chapter_number,
+          v.number AS volume_number, c.title AS chapter_title, s.heading, d.content
+        FROM scene_documents d
+        JOIN scenes s ON s.id = d.scene_id
        JOIN chapters c ON c.id = s.chapter_id
        JOIN volumes v ON v.id = c.volume_id
        WHERE d.content LIKE ? ESCAPE '\\'
@@ -633,8 +651,20 @@ export class ProjectDb {
       }
     }
     return this.adapter.all(
-      `SELECT e.internal_id, e.legacy_id, e.category_id, e.name, d.content
-       FROM codex_search_documents d JOIN codex_entries e ON e.internal_id = d.entry_internal_id
+       `WITH codex_documents AS (
+          SELECT e.internal_id,
+            e.name || CASE WHEN EXISTS (
+              SELECT 1 FROM codex_aliases WHERE entry_internal_id = e.internal_id
+            ) THEN char(10) || (
+              SELECT group_concat(alias, char(10))
+              FROM (
+                SELECT alias FROM codex_aliases WHERE entry_internal_id = e.internal_id ORDER BY sort_order
+              )
+            ) ELSE '' END || char(10) || e.body AS content
+         FROM codex_entries e
+       )
+       SELECT e.internal_id, e.legacy_id, e.category_id, e.name, d.content
+       FROM codex_documents d JOIN codex_entries e ON e.internal_id = d.internal_id
        WHERE d.content LIKE ? ESCAPE '\\' ORDER BY e.name`,
       [likeQuery(normalized)]
     ).map((row) => ({
@@ -865,11 +895,6 @@ export class ProjectDb {
     if (!scene) return;
     const paragraphs = this.adapter.all('SELECT content FROM scene_paragraphs WHERE scene_id = ? ORDER BY sort_order', [sceneId]);
     const content = [scene.heading, ...paragraphs.map((row) => row.content)].join('\n\n');
-    this.adapter.run(
-      `INSERT INTO scene_search_documents (scene_id, content, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(scene_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
-      [sceneId, content, now()]
-    );
     if (!this.ftsAvailable) return;
     try {
       this.adapter.run('DELETE FROM scenes_fts WHERE scene_id = ?', [sceneId]);
@@ -883,12 +908,6 @@ export class ProjectDb {
     const entry = this.adapter.get('SELECT name, body FROM codex_entries WHERE internal_id = ?', [internalId]);
     if (!entry) return;
     const aliases = this._valuesForEntry('codex_aliases', 'alias', internalId);
-    const content = [entry.name, ...aliases, entry.body].join('\n');
-    this.adapter.run(
-      `INSERT INTO codex_search_documents (entry_internal_id, content, updated_at) VALUES (?, ?, ?)
-       ON CONFLICT(entry_internal_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at`,
-      [internalId, content, now()]
-    );
     if (!this.ftsAvailable) return;
     try {
       this.adapter.run('DELETE FROM codex_fts WHERE entry_internal_id = ?', [internalId]);

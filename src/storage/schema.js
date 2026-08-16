@@ -209,7 +209,17 @@ function initializeFts(adapter) {
     adapter.transaction(() => {
       adapter.exec(FTS_SCHEMA_SQL);
       adapter.run('DELETE FROM scenes_fts');
-      adapter.run('INSERT INTO scenes_fts (scene_id, content) SELECT scene_id, content FROM scene_search_documents');
+      adapter.run(`
+        INSERT INTO scenes_fts (scene_id, content)
+        SELECT s.id,
+          s.heading || COALESCE((
+            SELECT char(10) || char(10) || group_concat(content, char(10) || char(10))
+            FROM (
+              SELECT content FROM scene_paragraphs WHERE scene_id = s.id ORDER BY sort_order
+            )
+          ), '')
+        FROM scenes s
+      `);
       adapter.run('DELETE FROM codex_fts');
       adapter.run(`
         INSERT INTO codex_fts (entry_internal_id, name, aliases, body)
@@ -249,5 +259,12 @@ export function initializeSchema(database) {
   }
 
   validateSchema(adapter);
+  try {
+    adapter.transaction(() => {
+      adapter.run('DELETE FROM scene_search_documents');
+      adapter.run('DELETE FROM codex_search_documents');
+      adapter.run("UPDATE codex_mentions SET context_text = ''");
+    });
+  } catch {}
   return { adapter, ftsAvailable: initializeFts(adapter), schemaVersion: SCHEMA_VERSION };
 }

@@ -1,4 +1,4 @@
-import React, { useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Extension } from '@tiptap/core';
 import { EditorContent, useEditor } from '@tiptap/react';
@@ -8,7 +8,7 @@ import Paragraph from '@tiptap/extension-paragraph';
 import Text from '@tiptap/extension-text';
 import { Plugin, PluginKey } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
-import { Book, BookOpenText, ChevronDown, ChevronRight, MapPin, Trash2, UserRound } from 'lucide-react';
+import { Book, BookOpenText, ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, MapPin, Trash2, UserRound } from 'lucide-react';
 import {
   hasHandlePermission,
   loadRecentProjectHandle,
@@ -26,6 +26,13 @@ import {
   saveProjectFile,
   supportsProjectFiles
 } from './browserDb.js';
+import { composeSystemPrompt } from './assistant/writingRules.browser.js';
+import { assembleContext, detectIntent } from './assistant/context.js';
+import { runGuard } from './assistant/guard.browser.js';
+import { createLLMClient } from './assistant/llmClient.js';
+import { createToolRegistry } from './assistant/tools.js';
+import { runAgent } from './assistant/agentLoop.js';
+import { findMentionOccurrences } from './storage/mentionIndexer.js';
 import '@fontsource/geist/400.css';
 import './styles.css';
 
@@ -39,10 +46,12 @@ const codexCategories = [
 ];
 
 function RootShell() {
+  const [aiMessages, setAiMessages] = useState([]);
+
   return (
     <>
       <InterfaceBackground />
-      <App />
+      <App aiMessages={aiMessages} setAiMessages={setAiMessages} />
     </>
   );
 }
@@ -125,9 +134,9 @@ function InterfaceBackground() {
   return <canvas ref={canvasRef} className="interfaceBackdrop" aria-hidden="true" />;
 }
 
-function App() {
+function App({ aiMessages, setAiMessages }) {
   const savedUiState = useMemo(() => readUiState(), []);
-  const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu ?? 'novel');
+  const [activeMenu, setActiveMenu] = useState(savedUiState.activeMenu === 'codex' ? 'codex' : 'novel');
   const [projectFile, setProjectFile] = useState(null);
   const projectFileRef = useRef(null);
   const [projectMeta, setProjectMeta] = useState(null);
@@ -163,6 +172,21 @@ function App() {
   const [hoveredMention, setHoveredMention] = useState(null);
   const [chapterMentionDetail, setChapterMentionDetail] = useState(null);
   const [pendingParagraphAnchor, setPendingParagraphAnchor] = useState(null);
+  const sceneEditorsRef = useRef(new Map());
+  const sceneEditorSelectionListenersRef = useRef(new Map());
+  const sceneEditorBlurListenersRef = useRef(new Map());
+  const aiAbortControllerRef = useRef(null);
+  const [aiStatus, setAiStatus] = useState(null);
+  const [aiWriterOpen, setAiWriterOpen] = useState(false);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [aiPrompt, setAiPrompt] = useState('');
+  const [aiManualRefs, setAiManualRefs] = useState({ chapters: [], codexEntries: [], selections: [] });
+  const [aiAssistAnchor, setAiAssistAnchor] = useState(null);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [draftBuffer, setDraftBuffer] = useState({ sceneId: null, prose: '' });
+  const [aiDraft, setAiDraft] = useState(null);
+  const novelRef = useRef(novel);
+  novelRef.current = novel;
   const selectedCodexRef = useRef(null);
   const unsavedStateRef = useRef(null);
   unsavedStateRef.current = { codexDirty, dirty, isSaving, projectPersistenceDirty };
@@ -235,6 +259,20 @@ function App() {
   useEffect(() => {
     writeUiState({ activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId });
   }, [activeMenu, selectedVolumeId, selectedChapter, codexCategory, selectedCodexId]);
+
+  const refreshAiStatus = async () => {
+    try {
+      const response = await fetch('/api/ai/status');
+      if (!response.ok) throw new Error('AI status is unavailable.');
+      setAiStatus(await response.json());
+    } catch (error) {
+      setAiStatus({ configured: false, error: error.message });
+    }
+  };
+
+  useEffect(() => {
+    refreshAiStatus();
+  }, []);
 
   useEffect(() => {
     setChapterMentionDetail(null);
@@ -923,6 +961,221 @@ function App() {
     setDirty(true);
   };
 
+  const selectionFromEditor = useCallback((sceneId, editor) => {
+    const state = editor?.view?.state ?? editor?.state;
+    const selection = state?.selection;
+    if (!selection || selection.empty) return null;
+    const chapter = novelRef.current?.chapters?.find((candidate) => candidate.scenes?.some((scene) => scene.id === sceneId));
+    const excerpt = state.doc.textBetween(selection.from, selection.to, '\n').trim();
+    return chapter && excerpt ? { sceneId, chapterId: chapter.id, excerpt, from: selection.from, to: selection.to } : null;
+  }, []);
+
+  const registerSceneEditor = useCallback((sceneId, editor) => {
+    const registered = sceneEditorsRef.current.get(sceneId);
+    const selectionListener = sceneEditorSelectionListenersRef.current.get(sceneId);
+    const blurListener = sceneEditorBlurListenersRef.current.get(sceneId);
+    if (registered && selectionListener) registered.off('selectionUpdate', selectionListener);
+    if (registered && blurListener) registered.off('blur', blurListener);
+
+    if (!editor) {
+      sceneEditorsRef.current.delete(sceneId);
+      sceneEditorSelectionListenersRef.current.delete(sceneId);
+      sceneEditorBlurListenersRef.current.delete(sceneId);
+      setAiAssistAnchor((current) => current?.sceneId === sceneId ? null : current);
+      return;
+    }
+
+    const updateSelection = () => {
+      const selection = selectionFromEditor(sceneId, editor);
+      if (!selection) {
+        setAiAssistAnchor(null);
+        return;
+      }
+      let startCoords;
+      let endCoords;
+      const endPosition = selection.to < editor.state.doc.content.size ? selection.to : selection.from;
+      try {
+        startCoords = editor.view?.coordsAtPos?.(selection.from);
+      } catch {
+        startCoords = null;
+      }
+      if (endPosition === selection.from) {
+        endCoords = startCoords;
+      } else {
+        try {
+          endCoords = editor.view?.coordsAtPos?.(endPosition);
+        } catch {
+          endCoords = null;
+        }
+      }
+      if (!startCoords) startCoords = endCoords;
+      if (!endCoords) endCoords = startCoords;
+      if (!startCoords || !endCoords) {
+        setAiAssistAnchor(null);
+        return;
+      }
+      const margin = 14;
+      const gap = 8;
+      const buttonWidth = 148;
+      const buttonHeight = 36;
+      const right = endCoords.right ?? endCoords.left;
+      let x = right + gap;
+      let y = startCoords.top - buttonHeight - gap;
+      if (y < margin) y = (startCoords.bottom ?? startCoords.top) + gap;
+      x = Math.max(margin, Math.min(x, window.innerWidth - buttonWidth - margin));
+      y = Math.max(margin, Math.min(y, window.innerHeight - buttonHeight - margin));
+      setAiAssistAnchor({ ...selection, x, y });
+    };
+    const handleBlur = () => setAiAssistAnchor(null);
+    sceneEditorsRef.current.set(sceneId, editor);
+    sceneEditorSelectionListenersRef.current.set(sceneId, updateSelection);
+    sceneEditorBlurListenersRef.current.set(sceneId, handleBlur);
+    editor.on('selectionUpdate', updateSelection);
+    editor.on('blur', handleBlur);
+  }, [selectionFromEditor]);
+
+  const pinAiAssistSelection = () => {
+    if (!aiAssistAnchor) return;
+    const entries = Object.values(codex ?? {}).flat();
+    const entryIdByInternalId = new Map(entries.map((entry) => [entry.internalId, entry.id]));
+    const codexIds = [...new Set(
+      findMentionOccurrences(aiAssistAnchor.excerpt, entries)
+        .map((occurrence) => entryIdByInternalId.get(occurrence.entryInternalId))
+        .filter(Boolean)
+    )];
+    const { x, y, ...selection } = aiAssistAnchor;
+    setAiManualRefs((current) => ({ ...current, selections: [...(current.selections ?? []), { ...selection, codexIds }] }));
+    setAiAssistAnchor(null);
+    setAiWriterOpen(true);
+  };
+
+  const runAiWriter = async () => {
+    const prompt = aiPrompt.trim();
+    const db = projectFileRef.current?.projectDb;
+    if (!prompt || !db || aiRunning) return;
+    const mode = detectIntent({ prompt, manualRefs: aiManualRefs });
+    const entries = Object.values(codex ?? {}).flat();
+    const projectFacts = {
+      title: projectMeta?.title || novel?.title,
+      projectTitle: projectMeta?.title || novel?.title,
+      characterNames: entries.filter((entry) => entry.type === 'character').map((entry) => entry.name),
+      codexNames: entries.map((entry) => entry.name),
+      codexAliases: entries.flatMap((entry) => entry.aliases ?? []),
+      chapterTitles: (novel?.chapters ?? []).map((chapter) => chapter.title)
+    };
+    const codexFlags = Object.fromEntries(entries.map((entry) => [entry.id, {
+      doNotTrack: entry.doNotTrack,
+      noAutoInclude: entry.noAutoInclude,
+      alwaysIncludeInContext: entry.alwaysIncludeInContext
+    }]));
+    const controller = new AbortController();
+    aiAbortControllerRef.current = controller;
+    setAiRunning(true);
+    setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: prompt }]);
+    setAiPrompt('');
+    setAiDraft(null);
+    const buffer = { sceneId: null, prose: '' };
+    setDraftBuffer(buffer);
+    try {
+      const llmClient = createLLMClient({});
+      const guard = await runGuard({ prompt, mode, projectFacts, llmClient, signal: controller.signal });
+      if (guard.verdict === 'out_of_topic') {
+        setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'guard', content: guard.reason }]);
+        return;
+      }
+      if (guard.skipped) {
+        setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'guard', content: 'Guard skipped — continuing with your request.' }]);
+      } else {
+        setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'guard', content: 'Request cleared for novel writing.' }]);
+      }
+      if (controller.signal.aborted) return;
+      const context = assembleContext({ db, manualRefs: aiManualRefs, codexFlags });
+      const result = await runAgent({
+        prompt,
+        context,
+        systemPrompt: composeSystemPrompt(projectFacts),
+        tools: createToolRegistry({ db, draftBuffer: buffer }),
+        llmClient,
+        signal: controller.signal,
+        onEvent(type, payload) {
+          if (type === 'iteration') {
+            setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'status', content: `Iteration ${payload.n}/12` }]);
+            return;
+          }
+          if (type === 'thought') {
+            setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'status', content: payload }]);
+            return;
+          }
+          if (type === 'text_delta') {
+            setAiMessages((current) => {
+              const last = current.at(-1);
+              if (last?.role === 'assistant' && last.streaming) {
+                return [...current.slice(0, -1), { ...last, content: last.content + payload }];
+              }
+              return [...current, { id: crypto.randomUUID(), role: 'assistant', content: payload, streaming: true }];
+            });
+            return;
+          }
+          if (type === 'tool_started') {
+            setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'tool', name: payload.name, content: `Using ${payload.name}…`, state: 'running' }]);
+            return;
+          }
+          if (type === 'tool_completed') {
+            setAiMessages((current) => {
+              const index = current.findLastIndex((message) => message.role === 'tool' && message.name === payload.name && message.state === 'running');
+              return index < 0 ? [...current, { id: crypto.randomUUID(), role: 'tool', name: payload.name, content: `Used ${payload.name}`, state: 'completed' }] : current.map((message, messageIndex) => messageIndex === index ? { ...message, content: `Used ${payload.name}`, state: 'completed' } : message);
+            });
+            return;
+          }
+          if (type === 'error') setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'error', content: payload.message }]);
+        }
+      });
+      const prose = result.finalProse || buffer.prose;
+      if (prose) {
+        const draft = { prose, selection: context.selection, sceneId: buffer.sceneId, stopReason: result.stopReason };
+        setAiDraft(draft);
+        setAiMessages((current) => [...current.map((message) => message.streaming ? { ...message, streaming: false } : message), { id: crypto.randomUUID(), role: 'draft', content: prose }]);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'error', content: error.message }]);
+    } finally {
+      if (aiAbortControllerRef.current === controller) aiAbortControllerRef.current = null;
+      setAiRunning(false);
+    }
+  };
+
+  const insertAiDraft = () => {
+    if (!aiDraft?.prose) return;
+    const targetSelection = aiDraft.selection;
+    const targetSceneId = targetSelection?.sceneId ?? aiDraft.sceneId ?? selected?.scenes?.at(-1)?.id;
+    const editor = sceneEditorsRef.current.get(targetSceneId);
+    if (!editor) {
+      setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'error', content: 'The pinned selection is not open. Navigate to its chapter and scene, then insert again.' }]);
+      return;
+    }
+    const content = paragraphsToDoc(String(aiDraft.prose).split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean));
+    if (targetSelection && targetSelection.from != null && targetSelection.to != null) {
+      const expectedExcerpt = normalizeWhitespace(targetSelection.excerpt);
+      let range = null;
+      if (targetSelection.from >= 0 && targetSelection.to <= editor.state.doc.content.size) {
+        const currentExcerpt = editor.state.doc.textBetween(targetSelection.from, targetSelection.to, '\n');
+        if (normalizeWhitespace(currentExcerpt) === expectedExcerpt) range = { from: targetSelection.from, to: targetSelection.to };
+      }
+      if (!range) {
+        const matchingRanges = findExcerptRange(editor.state.doc, expectedExcerpt);
+        if (matchingRanges.length === 1) range = matchingRanges[0];
+      }
+      if (!range) {
+        setAiMessages((current) => [...current, { id: crypto.randomUUID(), role: 'error', content: 'The pinned selection has changed; re-select and pin it again.' }]);
+        return;
+      }
+      editor.chain().focus().insertContentAt(range, content.content).run();
+    } else {
+      editor.chain().focus().insertContentAt(editor.state.doc.content.size, content.content).run();
+    }
+    setAiDraft(null);
+  };
+
   const addScene = (chapterId) => {
     novelRevisionRef.current += 1;
     setNovel((current) => ({
@@ -1027,7 +1280,8 @@ function App() {
   }
 
   return (
-    <main className="shell">
+    <>
+      <main className={aiWriterOpen ? 'shell hasAiPanel' : 'shell'}>
       <aside className="sidebar">
         <nav className="appMenu" aria-label="Main menu">
           <button
@@ -1047,7 +1301,7 @@ function App() {
         </nav>
 
         <div className="brand">
-          <span className="eyebrow">{activeMenu === 'novel' ? 'Novel' : 'Codex'}</span>
+          <span className="eyebrow">{activeMenu === 'codex' ? 'Codex' : 'Novel'}</span>
           <strong>{projectMeta?.title || novel.title || 'Untitled Project'}</strong>
         </div>
         <div className="stats">
@@ -1101,7 +1355,7 @@ function App() {
               <div className="emptyMenuState"><p>No project results found.</p></div>
             )}
           </nav>
-        ) : activeMenu === 'novel' ? (
+        ) : activeMenu !== 'codex' ? (
           <>
             <div className="volumeTabs" role="tablist" aria-label="Volumes">
               {volumes.map((volume) => (
@@ -1225,7 +1479,7 @@ function App() {
       </aside>
 
       <section className="workspace">
-        {activeMenu === 'novel' ? (
+        {activeMenu !== 'codex' ? (
           <>
             <header className="topbar">
               <div>
@@ -1286,6 +1540,7 @@ function App() {
             {selected.scenes.map((scene, sceneIndex) => (
               <SceneEditor
                 key={scene.id}
+                chapterId={selected.id}
                 scene={scene}
                 sceneIndex={sceneIndex}
                 mentionIndex={codexMentionIndex}
@@ -1293,6 +1548,7 @@ function App() {
                 onDelete={() => deleteScene(selected.id, scene.id)}
                 onMentionHover={showMentionHover}
                 onMentionLeave={hideMentionHover}
+                onEditorReady={registerSceneEditor}
               />
             ))}
 
@@ -1330,10 +1586,259 @@ function App() {
             </div>
           </div>
         )}
+        {aiSettingsOpen && <AISettingsDialog onClose={() => setAiSettingsOpen(false)} onStatusChange={refreshAiStatus} status={aiStatus} />}
         {hoveredMention && <CodexMentionHoverCard data={hoveredMention} onMouseEnter={keepMentionHover} onMouseLeave={hideMentionHover} />}
       </section>
-    </main>
+      <AIWriterPanel
+        chapters={novel?.chapters ?? []}
+        codexEntries={Object.values(codex ?? {}).flat()}
+        draft={aiDraft}
+        manualRefs={aiManualRefs}
+        onClose={() => setAiWriterOpen(false)}
+        onConfigure={() => setAiSettingsOpen(true)}
+        onInsert={insertAiDraft}
+        onPromptChange={setAiPrompt}
+        onRefsChange={setAiManualRefs}
+        onRun={runAiWriter}
+        onStop={() => aiAbortControllerRef.current?.abort()}
+        prompt={aiPrompt}
+        running={aiRunning}
+        status={aiStatus}
+        messages={aiMessages}
+      />
+      </main>
+      <button
+        aria-expanded={aiWriterOpen}
+        className={aiWriterOpen ? 'aiWriterSticky active' : 'aiWriterSticky'}
+        onClick={() => setAiWriterOpen((current) => !current)}
+        type="button"
+      >
+        AI Writer
+      </button>
+      {aiAssistAnchor && (
+        <div className="aiAssistAnchor" style={{ left: aiAssistAnchor.x, top: aiAssistAnchor.y }}>
+          <button className="button primary" onMouseDown={(event) => event.preventDefault()} onClick={pinAiAssistSelection} type="button">
+            AI Write Assist
+          </button>
+        </div>
+      )}
+    </>
   );
+}
+
+function AIWriterPanel({ chapters, codexEntries, draft, manualRefs, messages, onClose, onConfigure, onInsert, onPromptChange, onRefsChange, onRun, onStop, prompt, running, status }) {
+  const ready = Boolean(status?.configured && status?.authed);
+  const mode = detectIntent({ prompt, manualRefs });
+  const selections = manualRefs.selections ?? [];
+  const codexEntryById = new Map(codexEntries.map((entry) => [String(entry.id), entry]));
+  const [detailView, setDetailView] = useState(null);
+  const [contextOpen, setContextOpen] = useState(false);
+  const contextCount = selections.length + (manualRefs.chapters?.length ?? 0) + (manualRefs.codexEntries?.length ?? 0);
+  const detailSelection = detailView?.selection;
+  const detailChapter = chapters.find((chapter) => chapter.id === detailSelection?.chapterId);
+  const detailScene = detailChapter?.scenes?.find((scene) => scene.id === detailSelection?.sceneId);
+  const detailCodexEntries = (detailSelection?.codexIds ?? []).map((id) => codexEntryById.get(String(id)) ?? { id, name: String(id) });
+  return (
+    <>
+    <aside className="aiWriterPanel" aria-label="AI Writer" id="ai-writer-panel">
+      <div className="aiWriterPanelContent">
+        <header className="panelHeader aiChatHeader">
+          <div><p className="eyebrow">AI Writer</p><h2>AI Writer</h2></div>
+          <div className="panelActions"><button className="button ghost" onClick={onConfigure} type="button">Settings</button><button className="button ghost" onClick={onClose} type="button">Close</button></div>
+        </header>
+        <div className="aiChatThread" aria-live="polite">
+          {!ready ? <div className="aiChatEmpty"><strong>Configure AI first</strong><span>{status?.error || 'Choose a provider before sending writing requests.'}</span><button className="button primary" onClick={onConfigure} type="button">Configure AI</button></div> : !messages.length ? <div className="aiChatEmpty">Ask for an outline, a scene, or a continuation — then pin chapters or codex entries in the context reference below.</div> : messages.map((message) => (
+            <article className={`aiChatMessage ${message.role}`} key={message.id}>
+              <p>{message.content}</p>
+              {message.role === 'draft' && draft?.prose === message.content && <button className="button primary" onClick={onInsert} type="button">Insert draft</button>}
+            </article>
+          ))}
+        </div>
+        <div className="aiChatComposerUnit">
+          <section className="aiChatContext" aria-label="Writing context">
+            <div className="panelHeader">
+              <p className="eyebrow">Context reference{contextCount > 0 ? ` · ${contextCount}` : ''}</p>
+              <button aria-controls="aiChatContextCards" aria-expanded={contextOpen} className="button ghost" onClick={() => setContextOpen((current) => !current)} type="button">{contextOpen ? <><ChevronsDown size={14} aria-hidden="true" /> Close</> : <><ChevronsUp size={14} aria-hidden="true" /> Open</>}</button>
+            </div>
+            <div className={contextOpen ? 'aiChatContextCards contextCardsOpen' : 'aiChatContextCards'} id="aiChatContextCards" inert={!contextOpen}>
+              <div className="aiChatContextCardsInner panelStack">
+                <AiRefPicker
+                  label="Chapters"
+                  items={chapters.map((chapter) => ({ id: chapter.id, title: chapter.title }))}
+                  value={manualRefs.chapters}
+                  onChange={(chapters) => onRefsChange({ ...manualRefs, chapters })}
+                />
+                <AiRefPicker
+                  label="Codex entries"
+                  items={codexEntries.map((entry) => ({ id: entry.id, title: entry.name }))}
+                  value={manualRefs.codexEntries}
+                  onChange={(codexEntries) => onRefsChange({ ...manualRefs, codexEntries })}
+                />
+                <div className="panelStack">
+                  <div className="panelHeader">
+                    <p className="eyebrow">Selection</p>
+                    {selections.length > 0 && <button className="button ghost dangerText filterClear" onClick={() => onRefsChange({ ...manualRefs, selections: [] })} type="button">Clear selection</button>}
+                  </div>
+                  <div className="chipRow">
+                    {selections.length ? selections.map((selection, index) => {
+                      const firstLine = selection.excerpt?.split(/\r?\n/)[0].trim() || 'Selected text';
+                      const codexCount = selection.codexIds?.length ?? 0;
+                      return (
+                        <React.Fragment key={`${selection.sceneId}:${selection.from}:${selection.to}:${index}`}>
+                          <button className="chip" onClick={() => setDetailView({ kind: 'excerpt', selection })} type="button">{firstLine.length > 80 ? `${firstLine.slice(0, 80)}…` : firstLine}</button>
+                          {codexCount > 0 && <button className="chip" onClick={() => setDetailView({ kind: 'codex', selection })} type="button">{codexCount} codex {codexCount === 1 ? 'entry' : 'entries'}</button>}
+                        </React.Fragment>
+                      );
+                    }) : <span className="emptyChips">No pinned selections</span>}
+                  </div>
+                </div>
+                <div className="stats"><span>Mode: {mode}</span></div>
+              </div>
+            </div>
+          </section>
+          <form className="aiChatComposer" onSubmit={(event) => { event.preventDefault(); onRun(); }}>
+            <textarea disabled={!ready || running} value={prompt} onChange={(event) => onPromptChange(event.target.value)} placeholder="Ask for an outline, a scene, or a continuation…" aria-label="Writing prompt" rows="7" />
+            <div>{running && <button className="button secondary" onClick={onStop} type="button">Stop</button>}<button className="button primary" disabled={!ready || !prompt.trim() || running} type="submit">Run</button></div>
+          </form>
+        </div>
+      </div>
+    </aside>
+    {detailView && <div className="modalOverlay" onClick={() => setDetailView(null)} role="presentation"><section className="welcomeCard modal" onClick={(event) => event.stopPropagation()} role="dialog" aria-modal="true" aria-label={detailView.kind === 'excerpt' ? 'Selection details' : 'Selection codex entries'}>
+      <header className="panelHeader"><h2>{detailView.kind === 'excerpt' ? 'Selected text' : 'Codex context'}</h2><button className="button ghost" onClick={() => setDetailView(null)} type="button">Close</button></header>
+      {detailView.kind === 'excerpt' ? <div className="modalBody"><p className="notice">{detailChapter?.title || detailSelection?.chapterId || 'Unknown chapter'} · {detailScene?.heading || detailSelection?.sceneId || 'Unknown scene'}</p><div className="notice" style={{ whiteSpace: 'pre-wrap' }}>{detailSelection?.excerpt}</div></div> : <div className="modalBody codexHoverEntries">{detailCodexEntries.map((entry) => <section className="codexHoverEntry" key={entry.id}><div className="codexHoverEntryHeader"><div><h3>{entry.name}</h3>{entry.type && <p className={`entryType entryType${capitalize(entry.type)}`}>{entry.type}</p>}</div></div>{(entry.summary ?? entry.description) && <p className="notice">{entry.summary ?? entry.description}</p>}</section>)}</div>}
+    </section></div>}
+    </>
+  );
+}
+
+function AiRefPicker({ label, items, value, onChange }) {
+  const [query, setQuery] = useState('');
+  const [open, setOpen] = useState(false);
+  const values = Array.isArray(value) ? value.map(String) : [];
+  const itemById = new Map(items.map((item) => [String(item.id), item]));
+  const available = items.filter((item) => !values.includes(String(item.id)));
+  const filtered = available.filter((item) => item.title.toLowerCase().includes(query.trim().toLowerCase())).slice(0, 80);
+
+  const addValue = (item) => {
+    const id = String(item?.id ?? '').trim();
+    if (!id || values.includes(id)) return;
+    onChange([...values, id]);
+    setQuery('');
+    setOpen(false);
+  };
+
+  return (
+    <div className="valuePicker">
+      <p className="eyebrow">{label}</p>
+      <div className="chipRow">
+        {values.length ? values.map((id) => (
+          <button className="chip" key={id} onClick={() => onChange(values.filter((valueId) => valueId !== id))} type="button">
+            {itemById.get(id)?.title || id}
+            <span>×</span>
+          </button>
+        )) : <span className="emptyChips">No {label.toLowerCase()}</span>}
+      </div>
+      <div className="valuePickerControls">
+        <div className="comboBox">
+          <input
+            value={query}
+            onChange={(event) => { setQuery(event.target.value); setOpen(true); }}
+            onFocus={() => setOpen(true)}
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') setOpen(false);
+              if (event.key === 'Enter' && filtered[0]) { event.preventDefault(); addValue(filtered[0]); }
+            }}
+            placeholder={`Search ${label.toLowerCase()}`}
+            aria-label={`Search ${label.toLowerCase()}`}
+          />
+          {open && <div className="comboList">
+            {filtered.length ? filtered.map((item) => (
+              <button key={item.id} onMouseDown={(event) => event.preventDefault()} onClick={() => addValue(item)} type="button">{item.title}</button>
+            )) : <span>No matching {label.toLowerCase()}</span>}
+          </div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AISettingsDialog({ onClose, onStatusChange, status }) {
+  const [provider, setProvider] = useState(status?.provider ?? 'chatgpt');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [message, setMessage] = useState('');
+  const [signIn, setSignIn] = useState(null);
+  const signInPopupRef = useRef(null);
+
+  useEffect(() => {
+    if (!signIn?.flowId || signIn.state !== 'pending') return undefined;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/ai/signin/${encodeURIComponent(signIn.flowId)}`);
+        const result = await response.json();
+        if (cancelled) return;
+        const state = result.state ?? (result.authed ? 'authed' : ['expired', 'failed'].includes(result.error) ? result.error : 'pending');
+        if (state === 'authed') {
+          setSignIn((current) => ({ ...current, state }));
+          setMessage(result.note || 'ChatGPT connected.');
+          await onStatusChange();
+        } else if (state === 'expired' || state === 'failed') {
+          setSignIn((current) => ({ ...current, state, error: result.error }));
+          setMessage(result.error || `Sign-in ${state}. Try again.`);
+        }
+      } catch (error) {
+        if (!cancelled) setMessage(error.message);
+      }
+    };
+    poll();
+    const intervalId = window.setInterval(poll, 3000);
+    return () => { cancelled = true; window.clearInterval(intervalId); };
+  }, [onStatusChange, signIn?.flowId, signIn?.state]);
+
+  useEffect(() => {
+    if (signIn?.state !== 'authed') return undefined;
+    const timeoutId = window.setTimeout(onClose, 1800);
+    return () => window.clearTimeout(timeoutId);
+  }, [onClose, signIn?.state]);
+
+  const submit = async () => {
+    const popup = provider === 'chatgpt' ? window.open('', '_blank') : null;
+    signInPopupRef.current = popup;
+    const closePopup = () => {
+      if (popup && !popup.closed) popup.close();
+      if (signInPopupRef.current === popup) signInPopupRef.current = null;
+    };
+    try {
+      const response = await fetch('/api/ai/signin', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, apiKey, baseUrl }) });
+      const result = await response.json();
+      if (provider === 'chatgpt' && result.ok && result.pending) {
+        if (popup && !popup.closed) popup.location.href = result.verificationUrl;
+        setSignIn({ flowId: result.flowId, verificationUrl: result.verificationUrl, userCode: result.userCode, state: 'pending' });
+        setMessage('Complete approval in ChatGPT to continue.');
+        return;
+      }
+      closePopup();
+      setMessage(result.hint || result.note || (result.ok ? 'Provider configured.' : result.error || 'Could not configure provider.'));
+      await onStatusChange();
+    } catch (error) {
+      closePopup();
+      setMessage(error.message);
+    }
+  };
+  const changeProvider = (nextProvider) => { setProvider(nextProvider); setSignIn(null); setMessage(''); };
+  return <div className="modalOverlay" role="presentation"><section className="welcomeCard modal" role="dialog" aria-modal="true" aria-label="AI settings">
+    <header className="panelHeader"><h2>AI settings</h2><button className="button ghost" onClick={onClose} type="button">Close</button></header>
+    <div className="stats"><span>{status?.provider ? `${status.provider} · ${status.model} · ${status.authed ? 'authenticated' : 'not authenticated'}` : 'No provider configured'}</span></div>
+    {signIn?.state === 'pending' ? <div className="panelSection panelStack"><p className="eyebrow">ChatGPT verification code</p><div className="stats"><span><code>{signIn.userCode}</code></span></div><button className="button secondary" onClick={() => navigator.clipboard?.writeText(signIn.userCode)} type="button">Copy code</button><button className="button primary" onClick={() => window.open(signIn.verificationUrl, '_blank', 'noopener,noreferrer')} type="button">Open verification page</button><p className="notice">Waiting for approval…</p></div> : <>
+      <div className="panelStack">{[['chatgpt', 'ChatGPT'], ['agentrouter', 'AgentRouter'], ['opencode', 'opencode'], ['custom', 'Custom API key']].map(([value, label]) => <label key={value}><input checked={provider === value} onChange={() => changeProvider(value)} type="radio" name="ai-provider" value={value} /> {label}</label>)}</div>
+      {provider !== 'chatgpt' && <div className="codexFilters"><label className="eyebrow">API key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" /></label>{provider === 'custom' && <label className="eyebrow">Base URL<input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.openai.com" /></label>}</div>}
+      <button className="button primary" onClick={submit} type="button">{provider === 'chatgpt' ? 'Sign in with ChatGPT' : 'Save provider'}</button>
+    </>}
+    {signIn?.state === 'authed' && <div className="migrationNotice notice">ChatGPT connected successfully.</div>}
+    {signIn && signIn.state !== 'pending' && signIn.state !== 'authed' && <button className="button secondary" onClick={() => { setSignIn(null); setMessage(''); }} type="button">Try again</button>}
+    {message && <p className="notice">{message}</p>}
+  </section></div>;
 }
 
 function SearchableFilter({ label, options, value, onChange }) {
@@ -1658,7 +2163,7 @@ function CodexBodyEditor({ body, entryId, mentionIndex, onChange, onMentionHover
   );
 }
 
-function SceneEditor({ scene, sceneIndex, mentionIndex, onChange, onDelete, onMentionHover, onMentionLeave }) {
+function SceneEditor({ chapterId, scene, sceneIndex, mentionIndex, onChange, onDelete, onEditorReady, onMentionHover, onMentionLeave }) {
   const [expanded, setExpanded] = useState(true);
   const content = useMemo(() => paragraphsToDoc(scene.paragraphs), [scene.id]);
   const editor = useEditor({
@@ -1678,6 +2183,11 @@ function SceneEditor({ scene, sceneIndex, mentionIndex, onChange, onDelete, onMe
     if (!editor) return;
     editor.commands.setContent(paragraphsToDoc(scene.paragraphs), false);
   }, [editor, scene.id]);
+
+  useEffect(() => {
+    onEditorReady?.(scene.id, editor);
+    return () => onEditorReady?.(scene.id, null);
+  }, [editor, onEditorReady, scene.id]);
 
   return (
     <section className="sceneCard" data-scene-id={scene.id} data-scene-index={sceneIndex}>
@@ -2284,6 +2794,59 @@ function writeUiState(state) {
 
 function novelDraftKey(volumeId, projectId = 'unscoped') {
   return `${DRAFT_PREFIX}${projectId}:${volumeId}`;
+}
+
+function normalizeWhitespace(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function findExcerptRange(doc, excerpt) {
+  const target = normalizeWhitespace(excerpt);
+  if (!target) return [];
+
+  let source = '';
+  const positions = [];
+  let previousTextEnd = null;
+  doc.descendants((node, pos) => {
+    if (!node.isText) return;
+    if (previousTextEnd != null && pos > previousTextEnd) {
+      source += '\n';
+      positions.push(null);
+    }
+    for (let index = 0; index < node.text.length; index += 1) {
+      source += node.text[index];
+      positions.push(pos + index);
+    }
+    previousTextEnd = pos + node.nodeSize;
+  });
+
+  let normalized = '';
+  const normalizedPositions = [];
+  for (let index = 0; index < source.length; index += 1) {
+    if (/\s/.test(source[index])) {
+      if (normalized && !normalized.endsWith(' ')) {
+        normalized += ' ';
+        normalizedPositions.push(positions[index]);
+      }
+    } else {
+      normalized += source[index];
+      normalizedPositions.push(positions[index]);
+    }
+  }
+  if (normalized.endsWith(' ')) {
+    normalized = normalized.slice(0, -1);
+    normalizedPositions.pop();
+  }
+
+  const ranges = [];
+  let start = normalized.indexOf(target);
+  while (start >= 0) {
+    const from = normalizedPositions[start];
+    const to = normalizedPositions[start + target.length - 1];
+    if (from != null && to != null) ranges.push({ from, to: to + 1 });
+    start = normalized.indexOf(target, start + 1);
+  }
+  return ranges;
 }
 
 function starterNovel(volumeLabel, title) {

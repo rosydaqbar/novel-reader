@@ -41,6 +41,9 @@ export function createBetterSqliteAdapter(database) {
       });
       return execute();
     },
+    compact() {
+      database.exec('VACUUM');
+    },
     close() {
       database.close();
     }
@@ -104,6 +107,9 @@ export function createSqlJsAdapter(database) {
       } finally {
         transactionDepth -= 1;
       }
+    },
+    compact() {
+      database.run('VACUUM');
     },
     close() {
       database.close();

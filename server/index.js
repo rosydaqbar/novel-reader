@@ -8,6 +8,7 @@ import { compileCodex, createCodexEntry, deleteCodexEntry, listCodexEntries, rea
 import { countWords, flattenCodexEntries, parseNovel, serializeNovel } from './markdown.js';
 import { MAX_PROJECT_BYTES, PROJECT_MIME, ProjectFileError, ProjectServer } from './projectServer.js';
 import { containsTerm } from '../src/storage/mentionIndexer.js';
+import { createAIRouter } from './aiRouter.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(__dirname, '..');
@@ -61,6 +62,7 @@ export function createApp(options = {}) {
   );
 
   app.use(express.json({ limit: '25mb' }));
+  app.use(createAIRouter());
 
   app.get('/api/project', async (_request, response) => {
     const project = await requireProjectServer(projectServer).getProjectDb().getProjectMeta();

@@ -65,6 +65,9 @@ export class BrowserProjectFile {
 
   exportBytes() {
     this._assertOpen();
+    try {
+      this._projectDb.adapter.compact();
+    } catch {}
     return this._rawDb.export();
   }
 

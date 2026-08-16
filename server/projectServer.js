@@ -48,7 +48,11 @@ export class ProjectServer {
   }
 
   exportSnapshot() {
-    const database = this.getProjectDb().adapter.raw;
+    const projectDb = this.getProjectDb();
+    try {
+      projectDb.adapter.compact();
+    } catch {}
+    const database = projectDb.adapter.raw;
     return Buffer.from(database.serialize());
   }
 

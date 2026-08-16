@@ -356,8 +356,13 @@ label {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: 450px minmax(0, 1fr);
+  grid-template-columns: 450px minmax(0, 1fr) var(--ai-width, 0px);
   min-height: 100vh;
+  transition: grid-template-columns 300ms var(--ease-out), max-width 300ms var(--ease-out);
+}
+
+.shell.hasAiPanel {
+  --ai-width: 420px;
 }
 
 .sidebar {
@@ -748,6 +753,7 @@ label {
 }
 
 .workspace {
+  position: relative;
   min-width: 0;
   padding: 0 clamp(14px, 3.5vw, 44px) 48px;
 }
@@ -765,6 +771,109 @@ label {
   grid-template-columns: minmax(0, 980px) 380px;
   align-items: start;
   max-width: 1360px;
+}
+
+.panelHeader,
+.panelActions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.panelHeader h2 { margin: 0; font-size: 18px; }
+.panelStack,
+.panelSection { display: grid; gap: 9px; }
+.panelSection { border: 1px solid var(--border); background: var(--subtle-bg); padding: 12px; }
+.panelSection p { margin: 0; color: var(--muted); white-space: pre-wrap; }
+.notice { color: var(--muted); font-size: var(--font-ui); transition: var(--interaction-transition); animation: appearSoft 300ms var(--ease-out) both; }
+.notice.error { color: var(--danger-text); }
+.modalOverlay { position: fixed; inset: 0; z-index: 200; display: grid; place-items: center; background: rgba(0, 0, 0, 0.56); padding: 18px; animation: appearSoft 200ms var(--ease-out) both; }
+.modal { display: grid; gap: 14px; width: min(480px, 100%); border: 1px solid var(--border-strong); background: var(--surface); box-shadow: var(--surface-shadow); padding: 20px; animation: appearSoftLeft 320ms var(--ease-out) both; }
+.modalBody { display: grid; gap: 10px; max-height: 50vh; overflow-y: auto; }
+
+.aiWriterPanel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  border-left: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--surface-shadow);
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 16px 16px 0;
+}
+
+.aiWriterPanelContent {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  flex: 1 1 0;
+  min-height: 0;
+  height: auto;
+}
+
+.aiChatHeader { border-bottom: 1px solid var(--border); padding-bottom: 14px; }
+.aiChatComposerUnit { display: grid; gap: 10px; border: 1px solid var(--border-strong); border-radius: var(--radius) var(--radius) 0 0; background: var(--subtle-bg); padding: 12px; }
+.aiChatContext { display: grid; gap: 10px; }
+.aiChatContext > .panelHeader { padding-bottom: 8px; }
+.aiChatContext .valuePickerControls { grid-template-columns: minmax(0, 1fr); }
+.aiChatContextCards { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 300ms var(--ease-out); }
+.aiChatContextCards.contextCardsOpen { grid-template-rows: 1fr; }
+.aiChatContextCardsInner { min-height: 0; }
+.aiChatContextCards:not(.contextCardsOpen) .aiChatContextCardsInner { overflow: hidden; }
+.aiChatContextCards.contextCardsOpen .aiChatContextCardsInner { overflow: visible; }
+.aiChatThread { display: grid; align-content: start; gap: 10px; min-height: 0; overflow: auto; padding: 16px 0; }
+.aiChatEmpty { display: grid; gap: 10px; align-content: center; min-height: 180px; color: var(--muted); font-size: var(--font-ui); text-align: center; }
+.aiChatEmpty .button { justify-self: center; }
+.aiChatMessage { display: grid; gap: 9px; max-width: 92%; border: 1px solid var(--border); background: var(--subtle-bg); color: var(--text); padding: 10px 12px; animation: appearSoft 220ms var(--ease-out) both; }
+.aiChatMessage p { margin: 0; white-space: pre-wrap; }
+.aiChatMessage.user { justify-self: end; border-color: var(--accent-border-muted); background: var(--accent-soft); }
+.aiChatMessage.assistant,
+.aiChatMessage.draft { justify-self: start; }
+.aiChatMessage.status,
+.aiChatMessage.tool,
+.aiChatMessage.guard,
+.aiChatMessage.error { max-width: 100%; border: 0; background: transparent; color: var(--muted); font-size: var(--font-meta); padding: 2px 0; }
+.aiChatMessage.tool { color: var(--accent); }
+.aiChatMessage.guard { color: var(--text); }
+.aiChatMessage.error { color: var(--danger-text); }
+.aiChatMessage.draft .button { justify-self: start; }
+.aiChatComposer { display: grid; gap: 10px; }
+.aiChatComposer textarea { width: 100%; min-height: 72px; resize: vertical; border: 1px solid var(--border-strong); background: var(--field-bg); color: var(--text); font: inherit; outline: none; padding: 10px 12px; }
+.aiChatComposer textarea:focus { border-color: var(--accent-border); }
+.aiChatComposer > div { display: flex; justify-content: flex-end; gap: 8px; }
+
+.aiAssistAnchor { position: fixed; z-index: 180; }
+
+.aiWriterSticky {
+  position: fixed;
+  top: 50%;
+  right: 0;
+  z-index: 60;
+  min-height: 6.5rem;
+  width: 2.25rem;
+  border: 1px solid var(--border);
+  border-right: 0;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font-size: var(--font-meta);
+  writing-mode: vertical-rl;
+  padding: 10px 6px;
+  transform: translateY(-50%);
+  transition: right 300ms var(--ease-out), var(--interaction-transition);
+}
+
+.aiWriterSticky:hover,
+.aiWriterSticky:focus-visible {
+  background: var(--selected-bg);
+  outline: none;
+}
+
+.aiWriterSticky.active {
+  /* Keep in sync with --ai-width. */
+  right: 420px;
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .codexWorkspaceMain {
@@ -1458,6 +1567,31 @@ label {
     grid-template-columns: 1fr;
   }
 
+  .shell:not(.hasAiPanel) .aiWriterPanel {
+    display: none;
+  }
+
+  .aiWriterPanel {
+    display: flex;
+    flex-direction: column;
+    position: static;
+    height: 70vh;
+    min-height: 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+    overflow-y: auto;
+  }
+
+  .aiWriterPanelContent {
+    flex: 1 1 0;
+    min-height: 0;
+    height: auto;
+  }
+
+  .aiWriterSticky {
+    right: 0;
+  }
+
   .sidebar {
     position: static;
     height: auto;
@@ -1785,6 +1919,9 @@ textarea,
 
 @media (prefers-reduced-motion: reduce) {
   .chapterMentionDetail,
+  .modalOverlay,
+  .modal,
+  .shell,
   .codexWorkspaceLayout,
   .tiptapEditor > p.paragraphAnchorTarget {
     animation: none;

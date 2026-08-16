@@ -53,7 +53,13 @@ export function findMentionOccurrences(text, entries, contextRadius = 60) {
         accepted.push({ from, to });
         const contextText = source.slice(Math.max(0, from - contextRadius), Math.min(source.length, to + contextRadius));
         for (const entry of entriesByTerm.get(term)) {
-          occurrences.push({ entryInternalId: entry.internalId, term, startOffset: from, endOffset: to, contextText });
+          occurrences.push({
+            entryInternalId: entry.internalId,
+            term,
+            startOffset: from,
+            endOffset: to,
+            contextText
+          });
         }
       }
       from = source.indexOf(term, from + 1);
@@ -92,8 +98,8 @@ export function indexMentionsForScenes(adapter, sceneIds) {
       for (const occurrence of findMentionOccurrences(paragraph.content, entries)) {
         adapter.run(
           `INSERT INTO codex_mentions
-            (entry_internal_id, scene_id, paragraph_id, paragraph_index, term, start_offset, end_offset, context_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            (entry_internal_id, scene_id, paragraph_id, paragraph_index, term, start_offset, end_offset)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
           [
             occurrence.entryInternalId,
             sceneId,
@@ -101,8 +107,7 @@ export function indexMentionsForScenes(adapter, sceneIds) {
             paragraph.sort_order,
             occurrence.term,
             occurrence.startOffset,
-            occurrence.endOffset,
-            occurrence.contextText
+            occurrence.endOffset
           ]
         );
         inserted += 1;

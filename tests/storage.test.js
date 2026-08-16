@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import BetterSqlite3 from 'better-sqlite3';
 import initSqlJs from 'sql.js';
@@ -13,6 +16,15 @@ const engines = [
     name: 'better-sqlite3',
     async open() {
       return new BetterSqlite3(':memory:');
+    },
+    async openFromBytes(bytes) {
+      const directory = await mkdtemp(path.join(os.tmpdir(), 'novel-storage-round-trip-'));
+      const filePath = path.join(directory, 'project.novel');
+      await writeFile(filePath, bytes);
+      return {
+        raw: new BetterSqlite3(filePath),
+        cleanup: () => rm(directory, { recursive: true, force: true })
+      };
     }
   },
   {
@@ -21,6 +33,11 @@ const engines = [
       sqlJsPromise ??= initSqlJs();
       const SQL = await sqlJsPromise;
       return new SQL.Database();
+    },
+    async openFromBytes(bytes) {
+      sqlJsPromise ??= initSqlJs();
+      const SQL = await sqlJsPromise;
+      return { raw: new SQL.Database(bytes), cleanup: async () => {} };
     }
   }
 ];
@@ -206,7 +223,7 @@ for (const engine of engines) {
     }
   });
 
-  test(`${engine.name}: materialized search documents stay synchronized with fallback-compatible search`, async () => {
+  test(`${engine.name}: canonical search content stays synchronized with fallback-compatible search`, async () => {
     const raw = await engine.open();
     const db = new ProjectDb(raw);
     try {
@@ -223,7 +240,7 @@ for (const engine of engines) {
       assert.equal(db.searchScenes('sapphire').length, 0);
       assert.equal(db.searchScenes('amber')[0].chapterTitle, 'Search Chapter');
       db.ftsAvailable = false;
-      assert.equal(db.searchScenes('amber')[0].sceneId, scene.id, 'materialized LIKE fallback remains usable');
+      assert.equal(db.searchScenes('amber')[0].sceneId, scene.id, 'canonical LIKE fallback remains usable');
 
       const entry = db.createCodexEntry({
         category: 'lore',
@@ -239,8 +256,143 @@ for (const engine of engines) {
       assert.equal(db.searchCodex('Gold Flame')[0].entryInternalId, entry.internalId);
       assert.equal(db.searchCodex('winter').length, 0);
       assert.equal(db.searchCodex('summer')[0].entryId, 'lamp');
+      assert.equal(Number(db.adapter.get('SELECT COUNT(*) AS count FROM scene_search_documents').count), 0);
+      assert.equal(Number(db.adapter.get('SELECT COUNT(*) AS count FROM codex_search_documents').count), 0);
     } finally {
       db.close();
+    }
+  });
+
+  test(`${engine.name}: compact indexes retain derived mention context and canonical search results`, async () => {
+    const raw = await engine.open();
+    const db = new ProjectDb(raw);
+    try {
+      const volume = db.createVolume({ number: 1, title: 'Compact Indexes' });
+      const chapter = db.createChapter({ volumeId: volume.id, chapterNumber: 1, title: 'Dense References' });
+      const scenes = ['First', 'Second', 'Third'].map((heading) => db.createScene({ chapterId: chapter.id, heading }));
+      const aria = db.createCodexEntry({
+        category: 'characters', id: 'aria', name: 'Aria', aliases: ['The Singer'], body: 'Aria carries a sapphire lantern.'
+      });
+      const rite = db.createCodexEntry({ category: 'lore', id: 'rite', name: 'Lantern Rite', body: 'A sapphire observance.' });
+      const paragraph = `${'Before '.repeat(12)}Aria follows the Lantern Rite through sapphire light.${' After'.repeat(12)}`;
+      for (const scene of scenes) db.setParagraphs(scene.id, [paragraph, 'The Singer remembers Aria.']);
+
+      const mentions = db.getMentionsForScene(scenes[0].id);
+      const ariaMention = mentions.find((item) => item.entryInternalId === aria.internalId && item.term === 'Aria');
+      const expectedContext = paragraph.slice(Math.max(0, ariaMention.startOffset - 60), Math.min(paragraph.length, ariaMention.endOffset + 60));
+      assert.equal(ariaMention.context, expectedContext);
+      assert.equal(ariaMention.contextText, expectedContext);
+      assert.match(ariaMention.context, /Aria/);
+       assert.equal(Number(db.adapter.get('SELECT COALESCE(SUM(length(context_text)), 0) AS total FROM codex_mentions').total), 0);
+       db.adapter.run("UPDATE codex_mentions SET context_text = 'stale persisted context'");
+       assert.equal(db.getMentionsForScene(scenes[0].id).find((item) => item.id === ariaMention.id).context, expectedContext);
+       const currentParagraph = `Current ${'prefix '.repeat(12)}Aria follows the Lantern Rite through sapphire light.${' suffix'.repeat(12)}`;
+       db.setParagraphs(scenes[0].id, [currentParagraph, 'The Singer remembers Aria.']);
+       db.rebuildMentionIndex(volume.id);
+       const currentAriaMention = db.getMentionsForScene(scenes[0].id).find((item) => item.entryInternalId === aria.internalId && item.term === 'Aria');
+       const currentExpectedContext = currentParagraph.slice(
+         Math.max(0, currentAriaMention.startOffset - 60),
+         Math.min(currentParagraph.length, currentAriaMention.endOffset + 60)
+       );
+       assert.equal(currentAriaMention.context, currentExpectedContext);
+       assert.notEqual(currentAriaMention.context, 'stale persisted context');
+       assert.equal(Number(db.adapter.get('SELECT COUNT(*) AS count FROM scene_search_documents').count), 0);
+       assert.equal(Number(db.adapter.get('SELECT COUNT(*) AS count FROM codex_search_documents').count), 0);
+       assert.equal(Number(db.adapter.get('SELECT COALESCE(SUM(length(context_text)), 0) AS total FROM codex_mentions').total), 0);
+
+      db.ftsAvailable = false;
+      const sceneResult = db.searchScenes('Lantern Rite')[0];
+      const codexResult = db.searchCodex('sapphire').find((item) => item.entryInternalId === rite.internalId);
+      assert.equal(sceneResult.sceneId, scenes[0].id);
+      assert.match(sceneResult.snippet, /Lantern Rite/);
+      assert.equal(codexResult.entryInternalId, rite.internalId);
+      assert.match(codexResult.snippet, /sapphire/);
+    } finally {
+      db.close();
+    }
+  });
+
+  test(`${engine.name}: compacted export round-trips canonical project data`, async () => {
+    const raw = await engine.open();
+    const db = new ProjectDb(raw);
+    let reopened;
+    let cleanup = async () => {};
+    try {
+      const volume = db.createVolume({ number: 1, title: 'Round Trip' });
+      const chapter = db.createChapter({ volumeId: volume.id, chapterNumber: 1, title: 'Opening' });
+      const scene = db.createScene({ chapterId: chapter.id, heading: 'Arrival' });
+      const aria = db.createCodexEntry({ category: 'characters', id: 'aria', name: 'Aria', aliases: ['The Singer'], body: 'A traveler.' });
+      db.setParagraphs(scene.id, ['Aria arrives as The Singer.', 'Aria stays.']);
+      const original = {
+        novel: db.getNovel(volume.id),
+        codex: db.listCodex(),
+        mentions: db.getMentionsForScene(scene.id),
+        scenes: db.searchScenes('Aria'),
+        codexSearch: db.searchCodex('Singer'),
+        markdown: db.exportToMarkdown(volume.id)
+      };
+      db.adapter.compact();
+      const bytes = raw.export?.() ?? raw.serialize();
+      const opened = await engine.openFromBytes(bytes);
+      cleanup = opened.cleanup;
+      reopened = new ProjectDb(opened.raw);
+      assert.deepEqual(reopened.getNovel(volume.id), original.novel);
+      assert.deepEqual(reopened.listCodex(), original.codex);
+      assert.deepEqual(reopened.getMentionsForScene(scene.id), original.mentions);
+      assert.deepEqual(reopened.searchScenes('Aria'), original.scenes);
+      assert.deepEqual(reopened.searchCodex('Singer'), original.codexSearch);
+      assert.equal(reopened.exportToMarkdown(volume.id), original.markdown);
+      assert.equal(reopened.getCodexEntry(aria.internalId).name, 'Aria');
+    } finally {
+      reopened?.close();
+      await cleanup();
+      db.close();
+    }
+  });
+
+  test(`${engine.name}: opening a v1 project purges redundant stored search and mention context`, async () => {
+    const raw = await engine.open();
+    const db = new ProjectDb(raw);
+    let reopened;
+    let cleanup = async () => {};
+    try {
+      const volume = db.createVolume({ number: 1, title: 'Existing Project' });
+      const chapter = db.createChapter({ volumeId: volume.id, chapterNumber: 1, title: 'Existing Chapter' });
+      const scene = db.createScene({ chapterId: chapter.id, heading: 'Existing Scene' });
+      const paragraph = 'Aria consults the old map.';
+      db.setParagraphs(scene.id, [paragraph]);
+      const aria = db.createCodexEntry({ category: 'characters', id: 'aria', name: 'Aria', body: 'Keeper of the old map.' });
+      const expectedNovel = db.getNovel(volume.id);
+      const expectedCodex = db.listCodex();
+      const expectedMentions = db.getMentionsForScene(scene.id);
+
+      db.adapter.run('INSERT INTO scene_search_documents (scene_id, content) VALUES (?, ?)', [scene.id, 'obsolete scene search content']);
+      db.adapter.run('INSERT INTO codex_search_documents (entry_internal_id, content) VALUES (?, ?)', [aria.internalId, 'obsolete codex search content']);
+      db.adapter.run("UPDATE codex_mentions SET context_text = 'stale persisted context'");
+      const bytes = raw.export?.() ?? raw.serialize();
+      db.close();
+
+      const opened = await engine.openFromBytes(bytes);
+      cleanup = opened.cleanup;
+      reopened = new ProjectDb(opened.raw);
+      assert.equal(Number(reopened.adapter.get('SELECT COUNT(*) AS count FROM scene_search_documents').count), 0);
+      assert.equal(Number(reopened.adapter.get('SELECT COUNT(*) AS count FROM codex_search_documents').count), 0);
+      assert.equal(Number(reopened.adapter.get("SELECT COUNT(*) AS count FROM codex_mentions WHERE context_text <> ''").count), 0);
+      assert.deepEqual(reopened.getNovel(volume.id), expectedNovel);
+      assert.deepEqual(reopened.listCodex(), expectedCodex);
+      assert.deepEqual(reopened.getMentionsForScene(scene.id), expectedMentions);
+      const mention = reopened.getMentionsForScene(scene.id)[0];
+      const expectedContext = paragraph.slice(Math.max(0, mention.startOffset - 60), Math.min(paragraph.length, mention.endOffset + 60));
+      assert.equal(mention.context, expectedContext);
+      assert.equal(reopened.searchScenes('Aria')[0].sceneId, scene.id);
+      assert.equal(reopened.searchCodex('old map')[0].entryInternalId, aria.internalId);
+      reopened.ftsAvailable = false;
+      assert.equal(reopened.searchScenes('Aria')[0].sceneId, scene.id);
+      assert.equal(reopened.searchCodex('old map')[0].entryInternalId, aria.internalId);
+    } finally {
+      reopened?.close();
+      await cleanup();
+      if (!reopened) db.close();
     }
   });
 
